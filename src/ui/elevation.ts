@@ -3,7 +3,7 @@ import { project, saveProject, savePhoto, getPhoto, deletePhoto, undo, redo, can
 import { axisLen, distToSegment, type WallSide } from '../model/geometry';
 import { newId, type Anchor, type Dimension, type Route, type Wall, type XY } from '../model/types';
 import { connectDisto, onDistoStatus, setDistoTarget } from '../disto';
-import { dimGeomLengthMm, fromDisplay, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
+import { dimGeomLengthMm, fromDisplay, resolveAnchor, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
 import { registerCleanup, route } from '../main';
 import { mapPhotoToWall } from './photo-map';
 import { buildCostField, snapPathPx, simplifyPath, type CostField } from './chase-trace';
@@ -268,25 +268,28 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     redraw();
   }
 
+  /** ID trasy, na kterou kotva ukazuje (vrchol i bod na segmentu), jinak null. */
+  const routeIdOf = (a: Anchor): string | null =>
+    a.kind === 'routePoint' || a.kind === 'routeSeg' ? a.routeId : null;
+
   /** První kóta trasa↔hrana posune celou trasu tak, aby hodnota seděla. */
   function applyDimValue(dim: Dimension, mm: number): void {
     dim.valueMm = Math.round(mm);
-    const rp = dim.from.kind === 'routePoint' ? dim.from : dim.to.kind === 'routePoint' ? dim.to : null;
+    const rid = routeIdOf(dim.from) ?? routeIdOf(dim.to);
+    const ra = routeIdOf(dim.from) ? dim.from : dim.to; // kotva na trase
     const ed = dim.from.kind === 'edge' ? dim.from : dim.to.kind === 'edge' ? dim.to : null;
-    if (rp && ed) {
-      const route = W.routes.find((r) => r.id === rp.routeId);
+    if (rid && ed) {
+      const route = W.routes.find((r) => r.id === rid);
       const firstValued = W.dims.find(
-        (d) => d.valueMm != null &&
-          ((d.from.kind === 'routePoint' && d.from.routeId === rp.routeId) ||
-           (d.to.kind === 'routePoint' && d.to.routeId === rp.routeId)),
+        (d) => d.valueMm != null && (routeIdOf(d.from) === rid || routeIdOf(d.to) === rid),
       );
-      if (route && firstValued === dim) {
-        const p = route.points[rp.index];
+      const p = resolveAnchor(W, ra); // referenční bod (vrchol nebo bod na úsečce)
+      if (route && firstValued === dim && p) {
         let du = 0, dv = 0;
-        if (ed.edge === 'bottom') dv = mm - p.y;
-        else if (ed.edge === 'top') dv = (W.heightMm - mm) - p.y;
-        else if (ed.edge === 'left') du = mm - p.x;
-        else du = (L - mm) - p.x;
+        if (ed.edge === 'bottom') dv = mm - p.vMm;
+        else if (ed.edge === 'top') dv = (W.heightMm - mm) - p.vMm;
+        else if (ed.edge === 'left') du = mm - p.uMm;
+        else du = (L - mm) - p.uMm;
         for (let k = 0; k < route.points.length; k++) {
           route.points[k] = { x: route.points[k].x + du, y: route.points[k].y + dv };
         }
@@ -320,6 +323,25 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     return best;
   }
 
+  /** Nejbližší bod na úsečce některé trasy (kolmý průmět, oříznutý na segment). */
+  function hitRouteSeg(p: { uMm: number; vMm: number }, tolMm: number): { routeId: string; index: number; t: number } | null {
+    let best: { routeId: string; index: number; t: number } | null = null;
+    let bestD = tolMm;
+    for (const r of W.routes) {
+      for (let i = 0; i < r.points.length - 1; i++) {
+        const a = r.points[i], b = r.points[i + 1];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const len2 = dx * dx + dy * dy;
+        if (len2 === 0) continue;
+        let t = ((p.uMm - a.x) * dx + (p.vMm - a.y) * dy) / len2;
+        t = Math.min(1, Math.max(0, t));
+        const d = Math.hypot(p.uMm - (a.x + t * dx), p.vMm - (a.y + t * dy));
+        if (d < bestD) { bestD = d; best = { routeId: r.id, index: i, t }; }
+      }
+    }
+    return best;
+  }
+
   function hitEdge(p: { uMm: number; vMm: number }, tolMm: number): Anchor | null {
     // kanonické hrany; left/right v zobrazení převrátit podle strany
     const cands: ['top' | 'bottom' | 'left' | 'right', number][] = [
@@ -338,14 +360,14 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   /** Kotva, kterou by ťuknutí v bodě p vybralo — podle fáze kótování (1. vs 2. bod). */
   function dimAnchorAt(p: { uMm: number; vMm: number }, tolMm: number): Anchor {
     const free: Anchor = { kind: 'point', uMm: Math.round(p.uMm), vMm: Math.round(p.vMm) };
-    if (!dimFirst) {
-      const rp = hitRoutePoint(p, tolMm);
-      return rp ? { kind: 'routePoint', ...rp } : free;
-    }
-    const edge = hitEdge(p, tolMm);
-    if (edge) return edge;
-    const rp = hitRoutePoint(p, tolMm);
-    return rp ? { kind: 'routePoint', ...rp } : free;
+    const onRoute = (): Anchor | null => {
+      const rp = hitRoutePoint(p, tolMm); // vrchol/roh trasy má přednost
+      if (rp) return { kind: 'routePoint', ...rp };
+      const rs = hitRouteSeg(p, tolMm);   // jinak bod na úsečce šlicu
+      return rs ? { kind: 'routeSeg', ...rs } : null;
+    };
+    if (!dimFirst) return onRoute() ?? free;
+    return hitEdge(p, tolMm) ?? onRoute() ?? free;
   }
 
   /**
@@ -366,12 +388,14 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         : toDisplay(W, side, L, W.heightMm);
       return `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="${color}" stroke-width="70" stroke-linecap="round" opacity="0.55"/>`;
     }
-    if (a.kind === 'routePoint') {
+    if (a.kind === 'routePoint' || a.kind === 'routeSeg') {
       const r = W.routes.find((x) => x.id === a.routeId);
       if (!r || r.points.length < 2) return '';
-      const pts = r.points.map((pt) => toDisplay(W, side, pt.x, pt.y));
-      const d = pts.map((pt, i) => `${i ? 'L' : 'M'} ${pt.x} ${pt.y}`).join(' ');
-      const c = pts[a.index];
+      const pt = resolveAnchor(W, a);
+      if (!pt) return '';
+      const pts = r.points.map((q) => toDisplay(W, side, q.x, q.y));
+      const d = pts.map((q, i) => `${i ? 'L' : 'M'} ${q.x} ${q.y}`).join(' ');
+      const c = toDisplay(W, side, pt.uMm, pt.vMm);
       return `<path d="${d}" stroke="${color}" stroke-width="${Math.max(r.widthMm, 30) + 60}" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>`
         + `<circle cx="${c.x}" cy="${c.y}" r="90" fill="none" stroke="${color}" stroke-width="26"/>`;
     }
@@ -408,6 +432,16 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     input.addEventListener('change', () => {
       const mm = Number(input.value);
       if (mm > 0) apply(mm);
+    });
+    // Alternativa k metru: napsat číslo z klávesnice a potvrdit Enterem.
+    input.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const mm = Number(input.value);
+      if (mm > 0) {
+        apply(mm);
+        input.animate([{ background: '#0ea5e9' }, { background: 'transparent' }], { duration: 400 });
+      }
     });
     return input;
   }

@@ -73,6 +73,8 @@ export interface Route {
 
 export type Anchor =
   | { kind: 'routePoint'; routeId: string; index: number }
+  /** Bod na úsečce trasy: segment index → index+1, t ∈ ⟨0,1⟩ podél něj. Drží se trasy. */
+  | { kind: 'routeSeg'; routeId: string; index: number; t: number }
   | { kind: 'edge'; edge: 'top' | 'bottom' | 'left' | 'right' }
   | { kind: 'point'; uMm: number; vMm: number };
 

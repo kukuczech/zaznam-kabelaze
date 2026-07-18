@@ -35,6 +35,11 @@ export function resolveAnchor(wall: Wall, a: Anchor): { uMm: number; vMm: number
     const p = r?.points[a.index];
     return p ? { uMm: p.x, vMm: p.y } : null;
   }
+  if (a.kind === 'routeSeg') {
+    const r = wall.routes.find((x) => x.id === a.routeId);
+    const p0 = r?.points[a.index], p1 = r?.points[a.index + 1];
+    return p0 && p1 ? { uMm: p0.x + (p1.x - p0.x) * a.t, vMm: p0.y + (p1.y - p0.y) * a.t } : null;
+  }
   return null; // edge se řeší v páru s druhou kotvou
 }
 
