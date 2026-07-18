@@ -1,12 +1,12 @@
 // Elevation editor stěny: kreslení tras, kóty, fotky, DISTO plnění délek.
-import { project, saveProject, savePhoto, getPhoto, deletePhoto } from '../db';
+import { project, saveProject, savePhoto, getPhoto, deletePhoto, undo, redo, canUndo, canRedo, onHistoryChange } from '../db';
 import { axisLen, distToSegment, type WallSide } from '../model/geometry';
 import { newId, type Anchor, type Dimension, type Route, type Wall, type XY } from '../model/types';
 import { connectDisto, onDistoStatus, setDistoTarget } from '../disto';
 import { dimGeomLengthMm, fromDisplay, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
-import { registerCleanup } from '../main';
+import { registerCleanup, route } from '../main';
 import { mapPhotoToWall } from './photo-map';
-import { buildCostField, snapPathPx, type CostField } from './chase-trace';
+import { buildCostField, snapPathPx, simplifyPath, type CostField } from './chase-trace';
 
 type Mode = 'select' | 'draw' | 'dim' | 'photo';
 
@@ -25,9 +25,19 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     <header class="bar">
       <button id="back">←</button>
       <h1>${W.name} <span class="muted" style="font-size:13px">(strana ${side})</span></h1>
+      <button id="undo" title="Zpět (Ctrl+Z)">↶</button>
+      <button id="redo" title="Vpřed (Ctrl+Shift+Z)">↷</button>
       <button id="disto"><span id="disto-dot" class="dot" style="background:#64748b"></span> Metr</button>
     </header>
-    <div class="viewer-wrap"><svg class="elevation"></svg></div>
+    <div class="viewer-wrap">
+      <svg class="elevation"></svg>
+      <div class="zoom-ctl">
+        <button id="zin" title="Přiblížit">＋</button>
+        <input id="zoom" type="range" min="0" max="1000" value="0" title="Lupa" />
+        <button id="zout" title="Oddálit">－</button>
+        <div class="zpct" id="zpct">100 %</div>
+      </div>
+    </div>
     <div id="panel"></div>
     <div class="toolbar">
       <button data-mode="select">👆 Vybrat</button>
@@ -39,6 +49,15 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     </div>`;
 
   root.querySelector('#back')!.addEventListener('click', () => (location.hash = `#/storey/${storeyId}`));
+
+  // --- undo / redo ---
+  const undoBtn = root.querySelector('#undo') as HTMLButtonElement;
+  const redoBtn = root.querySelector('#redo') as HTMLButtonElement;
+  const syncHistoryBtns = () => { undoBtn.disabled = !canUndo(); redoBtn.disabled = !canRedo(); };
+  syncHistoryBtns();
+  registerCleanup(onHistoryChange(syncHistoryBtns));
+  undoBtn.addEventListener('click', async () => { if (await undo()) await route(); });
+  redoBtn.addEventListener('click', async () => { if (await redo()) await route(); });
 
   // --- DISTO ---
   const distoDot = root.querySelector('#disto-dot') as HTMLElement;
@@ -56,7 +75,9 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   let selectedRouteId: string | null = null;
   let draft: Route | null = null;
   let dimFirst: Anchor | null = null;
-  let vb: ViewBox = wallViewBox(W);
+  const fitVb: ViewBox = wallViewBox(W); // referenční „vejít se" = lupa 100 %
+  let vb: ViewBox = { ...fitVb };
+  const ZMIN = 0.5, ZMAX = 12; // rozsah lupy (0.5× … 12×)
   let categoryId = project.categories[0]?.id ?? '';
   let brushWidthMm = 60;
   let snap = false; // magnetické přichytávání trasy na tmavý šlic v podkladu
@@ -85,13 +106,21 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     const w = fromDisplay(W, side, (x / costField!.w) * L, (y / costField!.h) * W.heightMm);
     return { x: Math.round(Math.min(Math.max(w.uMm, 0), L)), y: Math.round(Math.min(Math.max(w.vMm, 0), W.heightMm)) };
   }
-  /** Magneticky přichycená lomená čára z prev do bodu p (bez počátku prev). */
+  /**
+   * Magneticky přichycená lomená čára z prev do bodu p (bez počátku prev).
+   * Zjednodušení běží v reálných mm (tolerance SNAP_TOL_MM), aby vzniklo jen
+   * pár kótovatelných bodů, ne stovky pixelových kroků. Strop MAX_SNAP_PTS.
+   */
   function snapDraftPath(prev: XY, p: { uMm: number; vMm: number }): XY[] {
+    const SNAP_TOL_MM = 50, MAX_SNAP_PTS = 12;
     const a = wallToPx(prev.x, prev.y);
     const b = wallToPx(Math.min(Math.max(p.uMm, 0), L), Math.min(Math.max(p.vMm, 0), W.heightMm));
-    const px = snapPathPx(costField!, a, b);
-    const out: XY[] = [];
-    for (let i = 1; i < px.length; i++) out.push(pxToWall(px[i].x, px[i].y));
+    const mm = snapPathPx(costField!, a, b).map((pt) => pxToWall(pt.x, pt.y));
+    mm[0] = { x: prev.x, y: prev.y }; // přesně navázat na předchozí bod
+    let tol = SNAP_TOL_MM;
+    let simp = simplifyPath(mm, tol);
+    while (simp.length - 1 > MAX_SNAP_PTS) { tol *= 1.6; simp = simplifyPath(mm, tol); }
+    const out = simp.slice(1); // bez počátku (== prev)
     if (out.length === 0) out.push({ x: Math.round(Math.min(Math.max(p.uMm, 0), L)), y: Math.round(Math.min(Math.max(p.vMm, 0), W.heightMm)) });
     return out;
   }
@@ -110,6 +139,46 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   function setViewBox(): void {
     svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
   }
+
+  // --- lupa (posuvník + kolečko + pinch, vše propojené) ---
+  const zoomSlider = root.querySelector('#zoom') as HTMLInputElement;
+  const zpct = root.querySelector('#zpct') as HTMLElement;
+  const clamp = (z: number) => Math.min(Math.max(z, ZMIN), ZMAX);
+  const zoomNow = () => fitVb.w / vb.w; // aktuální přiblížení vůči „vejít se"
+  const sliderToZoom = (s: number) => ZMIN * Math.pow(ZMAX / ZMIN, s / 1000);
+  const zoomToSlider = (z: number) => (1000 * Math.log(z / ZMIN)) / Math.log(ZMAX / ZMIN);
+
+  /** Sladí posuvník a procento s aktuálním viewBoxem. */
+  function syncZoom(): void {
+    const z = zoomNow();
+    zoomSlider.value = String(Math.round(zoomToSlider(z)));
+    zpct.textContent = `${Math.round(z * 100)} %`;
+  }
+
+  /**
+   * Nastaví přiblížení na z× a zachová pevný bod (screenX/Y) — kolečko drží bod
+   * pod kurzorem, posuvník/tlačítka drží střed plochy.
+   */
+  function zoomTo(z: number, screenX?: number, screenY?: number): void {
+    z = clamp(z);
+    const r = svg.getBoundingClientRect();
+    const px = screenX ?? r.left + r.width / 2;
+    const py = screenY ?? r.top + r.height / 2;
+    const fx = vb.x + ((px - r.left) / r.width) * vb.w;
+    const fy = vb.y + ((py - r.top) / r.height) * vb.h;
+    const nw = fitVb.w / z, nh = fitVb.h / z;
+    vb = {
+      w: nw, h: nh,
+      x: fx - ((px - r.left) / r.width) * nw,
+      y: fy - ((py - r.top) / r.height) * nh,
+    };
+    setViewBox();
+    syncZoom();
+  }
+
+  zoomSlider.addEventListener('input', () => zoomTo(sliderToZoom(Number(zoomSlider.value))));
+  (root.querySelector('#zin') as HTMLButtonElement).addEventListener('click', () => zoomTo(zoomNow() * 1.4));
+  (root.querySelector('#zout') as HTMLButtonElement).addEventListener('click', () => zoomTo(zoomNow() / 1.4));
 
   function redraw(): void {
     svg.innerHTML = wallSvgContent(W, {
@@ -233,6 +302,65 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     let edge = cands[0][0];
     if (side === 'B' && (edge === 'left' || edge === 'right')) edge = edge === 'left' ? 'right' : 'left';
     return { kind: 'edge', edge };
+  }
+
+  /** Kotva, kterou by ťuknutí v bodě p vybralo — podle fáze kótování (1. vs 2. bod). */
+  function dimAnchorAt(p: { uMm: number; vMm: number }, tolMm: number): Anchor {
+    const free: Anchor = { kind: 'point', uMm: Math.round(p.uMm), vMm: Math.round(p.vMm) };
+    if (!dimFirst) {
+      const rp = hitRoutePoint(p, tolMm);
+      return rp ? { kind: 'routePoint', ...rp } : free;
+    }
+    const edge = hitEdge(p, tolMm);
+    if (edge) return edge;
+    const rp = hitRoutePoint(p, tolMm);
+    return rp ? { kind: 'routePoint', ...rp } : free;
+  }
+
+  /** SVG zvýraznění kotvy (hrana = pruh, bod trasy = celá trasa + kroužek, volný bod = křížek). */
+  function anchorHighlightSvg(a: Anchor, color: string): string {
+    if (a.kind === 'edge') {
+      const e = a.edge;
+      const p1 = e === 'top' ? toDisplay(W, side, 0, W.heightMm)
+        : e === 'bottom' ? toDisplay(W, side, 0, 0)
+        : e === 'left' ? toDisplay(W, side, 0, 0)
+        : toDisplay(W, side, L, 0);
+      const p2 = e === 'top' ? toDisplay(W, side, L, W.heightMm)
+        : e === 'bottom' ? toDisplay(W, side, L, 0)
+        : e === 'left' ? toDisplay(W, side, 0, W.heightMm)
+        : toDisplay(W, side, L, W.heightMm);
+      return `<line x1="${p1.x}" y1="${p1.y}" x2="${p2.x}" y2="${p2.y}" stroke="${color}" stroke-width="70" stroke-linecap="round" opacity="0.55"/>`;
+    }
+    if (a.kind === 'routePoint') {
+      const r = W.routes.find((x) => x.id === a.routeId);
+      if (!r || r.points.length < 2) return '';
+      const pts = r.points.map((pt) => toDisplay(W, side, pt.x, pt.y));
+      const d = pts.map((pt, i) => `${i ? 'L' : 'M'} ${pt.x} ${pt.y}`).join(' ');
+      const c = pts[a.index];
+      return `<path d="${d}" stroke="${color}" stroke-width="${Math.max(r.widthMm, 30) + 60}" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>`
+        + `<circle cx="${c.x}" cy="${c.y}" r="90" fill="none" stroke="${color}" stroke-width="26"/>`;
+    }
+    const c = toDisplay(W, side, a.uMm, a.vMm);
+    return `<circle cx="${c.x}" cy="${c.y}" r="55" fill="${color}" opacity="0.5"/>`
+      + `<path d="M ${c.x - 130} ${c.y} H ${c.x + 130} M ${c.x} ${c.y - 130} V ${c.y + 130}" stroke="${color}" stroke-width="14"/>`;
+  }
+
+  // Vrstva živého zvýraznění při kótování (mimo hlavní redraw, aktualizuje se při pohybu myši).
+  let dimHoverLayer: SVGGElement | null = null;
+  function clearDimHover(): void { dimHoverLayer?.remove(); dimHoverLayer = null; }
+  function showDimHover(clientX: number, clientY: number): void {
+    const p = screenToWall(clientX, clientY);
+    const tol = 30 * mmPerPx();
+    const target = dimAnchorAt(p, tol * 2);
+    clearDimHover();
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    g.setAttribute('pointer-events', 'none');
+    let markup = '';
+    if (dimFirst) markup += anchorHighlightSvg(dimFirst, '#fbbf24'); // pevný počáteční bod
+    markup += anchorHighlightSvg(target, '#22d3ee');                 // živý cíl pod kurzorem
+    g.innerHTML = markup;
+    svg.appendChild(g);
+    dimHoverLayer = g;
   }
 
   // --- panely ---
@@ -565,6 +693,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   function setMode(m: Mode): void {
     mode = m;
     dimFirst = null;
+    clearDimHover();
     root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((b) => {
       b.classList.toggle('active', b.dataset.mode === m);
     });
@@ -621,6 +750,10 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   });
 
   svg.addEventListener('pointermove', (e) => {
+    if (pointers.size === 0) { // pouhé najetí kurzorem (žádné tlačítko)
+      if (mode === 'dim') showDimHover(e.clientX, e.clientY); else clearDimHover();
+      return;
+    }
     const prev = pointers.get(e.pointerId);
     if (!prev) return;
     if (pointers.size === 1 && !pinchStart) {
@@ -632,7 +765,9 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       const [a, b] = [...pointers.values()];
       const dist = Math.hypot(a.x - b.x, a.y - b.y) || 1;
-      const k = pinchStart.dist / dist;
+      let k = pinchStart.dist / dist;
+      // clamp přiblížení do rozsahu lupy
+      k = Math.min(Math.max(k, fitVb.w / (ZMAX * pinchStart.vb.w)), fitVb.w / (ZMIN * pinchStart.vb.w));
       const cx = pinchStart.vb.x + pinchStart.vb.w / 2;
       const cy = pinchStart.vb.y + pinchStart.vb.h / 2;
       vb = {
@@ -642,10 +777,13 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         y: cy - (pinchStart.vb.h * k) / 2,
       };
       setViewBox();
+      syncZoom();
       return;
     }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   });
+
+  svg.addEventListener('pointerleave', () => clearDimHover());
 
   svg.addEventListener('pointerup', (e) => {
     pointers.delete(e.pointerId);
@@ -676,16 +814,13 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       showSelectPanel();
     } else if (mode === 'dim') {
       if (!dimFirst) {
-        const rp = hitRoutePoint(p, tol * 2);
-        dimFirst = rp ? { kind: 'routePoint', ...rp } : { kind: 'point', uMm: Math.round(p.uMm), vMm: Math.round(p.vMm) };
+        dimFirst = dimAnchorAt(p, tol * 2);
         showDimPanel();
       } else {
-        const edge = hitEdge(p, tol * 2);
-        const rp = edge ? null : hitRoutePoint(p, tol * 2);
-        const to: Anchor = edge ?? (rp ? { kind: 'routePoint', ...rp } : { kind: 'point', uMm: Math.round(p.uMm), vMm: Math.round(p.vMm) });
-        const dim: Dimension = { id: newId(), from: dimFirst, to, valueMm: null };
+        const dim: Dimension = { id: newId(), from: dimFirst, to: dimAnchorAt(p, tol * 2), valueMm: null };
         W.dims.push(dim);
         dimFirst = null;
+        clearDimHover();
         saveProject();
         redraw();
         showDimPanel();
@@ -695,14 +830,11 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
 
   svg.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const k = e.deltaY > 0 ? 1.15 : 1 / 1.15;
-    const r = svg.getBoundingClientRect();
-    const fx = vb.x + ((e.clientX - r.left) / r.width) * vb.w;
-    const fy = vb.y + ((e.clientY - r.top) / r.height) * vb.h;
-    vb = { w: vb.w * k, h: vb.h * k, x: fx - (fx - vb.x) * k, y: fy - (fy - vb.y) * k };
-    setViewBox();
+    const k = e.deltaY > 0 ? 1 / 1.15 : 1.15; // kolečko nahoru = přiblížit
+    zoomTo(zoomNow() * k, e.clientX, e.clientY);
   }, { passive: false });
 
   await loadBackground();
   setMode('select');
+  syncZoom();
 }

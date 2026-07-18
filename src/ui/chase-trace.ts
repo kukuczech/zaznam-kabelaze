@@ -91,7 +91,7 @@ export function snapPathPx(f: CostField, a: P, b: P, padPx = 40): P[] {
     if (cur === s) break;
   }
   path.reverse();
-  return simplify(path, 2.5);
+  return simplifyPath(path, 2.5);
 }
 
 function clampI(v: number, lo: number, hi: number): number {
@@ -99,7 +99,7 @@ function clampI(v: number, lo: number, hi: number): number {
 }
 
 /** Douglas–Peucker: zredukuje lomenou čáru, krajní body zachová. */
-function simplify(pts: P[], tol: number): P[] {
+export function simplifyPath(pts: P[], tol: number): P[] {
   if (pts.length <= 2) return pts;
   const keep = new Uint8Array(pts.length);
   keep[0] = keep[pts.length - 1] = 1;

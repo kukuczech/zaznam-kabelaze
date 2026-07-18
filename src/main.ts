@@ -1,9 +1,10 @@
 // Bootstrap + jednoduchý hash router: #/ | #/storey/:id | #/wall/:id/:strana | #/print
-import { loadProject } from './db';
+import { loadProject, undo, redo } from './db';
 import { renderHome } from './ui/home';
 import { renderViewer3d } from './ui/viewer3d';
 import { renderElevation } from './ui/elevation';
 import { renderPrint } from './ui/print';
+import { initUpdateCheck } from './ui/update-check';
 import type { WallSide } from './model/geometry';
 
 const app = document.getElementById('app')!;
@@ -14,7 +15,7 @@ export function registerCleanup(fn: () => void): void {
   cleanups.push(fn);
 }
 
-async function route(): Promise<void> {
+export async function route(): Promise<void> {
   cleanups.splice(0).forEach((fn) => fn());
   const hash = location.hash || '#/';
   const [, screen, id, arg] = hash.split('/');
@@ -27,7 +28,30 @@ async function route(): Promise<void> {
 
 window.addEventListener('hashchange', route);
 
+// Globální undo/redo: Ctrl/Cmd+Z zpět, Ctrl/Cmd+Shift+Z nebo Ctrl+Y vpřed.
+// Uvnitř textových polí necháme nativní undo prohlížeči.
+function isEditable(el: EventTarget | null): boolean {
+  const t = el as HTMLElement | null;
+  if (!t) return false;
+  const tag = t.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
+}
+
+window.addEventListener('keydown', async (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+  const key = e.key.toLowerCase();
+  const isUndo = key === 'z' && !e.shiftKey;
+  const isRedo = (key === 'z' && e.shiftKey) || key === 'y';
+  if (!isUndo && !isRedo) return;
+  if (isEditable(e.target)) return;
+  e.preventDefault();
+  if (await (isUndo ? undo() : redo())) await route();
+});
+
 loadProject().then(route);
+
+// Sleduj, jestli není venku nová verze, a nabídni obnovení.
+initUpdateCheck();
 
 // Dev-only: import IFC z URL (testování bez souborového dialogu), např.
 // devImportIfc('./testdata/gf.ifc')
