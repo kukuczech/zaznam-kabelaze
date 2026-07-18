@@ -76,6 +76,8 @@ export interface WallSvgOptions {
   side: WallSide;
   categories: Category[];
   selectedRouteId?: string | null;
+  /** Zvýrazněná kóta (režim úprav kóty). */
+  selectedDimId?: string | null;
   /** Rozpracovaná trasa při kreslení (v kanonických souřadnicích). */
   draftPoints?: { x: number; y: number }[];
   draftColor?: string;
@@ -170,16 +172,18 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
   const OFF = 300;   // odsazení kótovací čáry od měřeného úseku (mm)
   const OVER = 90;   // přesah vynášecí čáry za kótovací čáru
   const GAP = 40;    // mezera mezi měřeným bodem a začátkem vynášecí čáry
-  const arrow = (px: number, py: number, dx: number, dy: number): string => {
+  const arrow = (px: number, py: number, dx: number, dy: number, color: string): string => {
     // šipka: hrot v (px,py), míří ven ve směru (dx,dy)
     const AL = 130, AW = 45;
     const bx = px - dx * AL, by = py - dy * AL;
     const nx = -dy, ny = dx;
-    return `<path d="M ${px} ${py} L ${bx + nx * AW} ${by + ny * AW} L ${bx - nx * AW} ${by - ny * AW} Z" fill="${dimColor}"/>`;
+    return `<path d="M ${px} ${py} L ${bx + nx * AW} ${by + ny * AW} L ${bx - nx * AW} ${by - ny * AW} Z" fill="${color}"/>`;
   };
   for (const dim of wall.dims) {
     const ep = dimEndpoints(wall, dim);
     if (!ep) continue;
+    const sel = !print && dim.id === opts.selectedDimId;
+    const dc = sel ? '#38bdf8' : dimColor; // vybraná kóta výrazně jinou barvou
     const a = toDisplay(wall, side, ep.a.uMm, ep.a.vMm);
     const b = toDisplay(wall, side, ep.b.uMm, ep.b.vMm);
     const value = dim.valueMm ?? Math.round(Math.hypot(ep.b.uMm - ep.a.uMm, ep.b.vMm - ep.a.vMm));
@@ -187,8 +191,8 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
     const seg = Math.hypot(b.x - a.x, b.y - a.y);
     if (seg < 1) {
       parts.push(
-        `<circle cx="${a.x}" cy="${a.y}" r="35" fill="${dimColor}" data-dim="${dim.id}"/>`,
-        `<text x="${a.x}" y="${a.y - 60}" text-anchor="middle" font-size="140" fill="${dimColor}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="40">${label}</text>`,
+        `<circle cx="${a.x}" cy="${a.y}" r="${sel ? 55 : 35}" fill="${dc}" data-dim="${dim.id}"/>`,
+        `<text x="${a.x}" y="${a.y - 60}" text-anchor="middle" font-size="140" fill="${dc}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="40">${label}</text>`,
       );
       continue;
     }
@@ -203,14 +207,14 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
     const tX = (aX + bX) / 2 + nx * 95, tY = (aY + bY) / 2 + ny * 95;
     parts.push(
       // vynášecí čáry (od měřených bodů přes kótovací čáru s malým přesahem)
-      `<line x1="${a.x + nx * GAP}" y1="${a.y + ny * GAP}" x2="${a.x + nx * (OFF + OVER)}" y2="${a.y + ny * (OFF + OVER)}" stroke="${dimColor}" stroke-width="6"/>`,
-      `<line x1="${b.x + nx * GAP}" y1="${b.y + ny * GAP}" x2="${b.x + nx * (OFF + OVER)}" y2="${b.y + ny * (OFF + OVER)}" stroke="${dimColor}" stroke-width="6"/>`,
+      `<line x1="${a.x + nx * GAP}" y1="${a.y + ny * GAP}" x2="${a.x + nx * (OFF + OVER)}" y2="${a.y + ny * (OFF + OVER)}" stroke="${dc}" stroke-width="6"/>`,
+      `<line x1="${b.x + nx * GAP}" y1="${b.y + ny * GAP}" x2="${b.x + nx * (OFF + OVER)}" y2="${b.y + ny * (OFF + OVER)}" stroke="${dc}" stroke-width="6"/>`,
       // kótovací čára + šipky mířící ven k vynášecím čárám
-      `<line x1="${aX}" y1="${aY}" x2="${bX}" y2="${bY}" stroke="${dimColor}" stroke-width="8" data-dim="${dim.id}"/>`,
-      arrow(aX, aY, -dxu, -dyu),
-      arrow(bX, bY, dxu, dyu),
+      `<line x1="${aX}" y1="${aY}" x2="${bX}" y2="${bY}" stroke="${dc}" stroke-width="${sel ? 16 : 8}" data-dim="${dim.id}"/>`,
+      arrow(aX, aY, -dxu, -dyu, dc),
+      arrow(bX, bY, dxu, dyu, dc),
       // popisek vzdálenosti nad kótovací čárou
-      `<text x="${tX}" y="${tY}" text-anchor="middle" dominant-baseline="central" transform="rotate(${ang.toFixed(1)} ${tX} ${tY})" font-size="140" fill="${dimColor}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="40">${label}</text>`,
+      `<text x="${tX}" y="${tY}" text-anchor="middle" dominant-baseline="central" transform="rotate(${ang.toFixed(1)} ${tX} ${tY})" font-size="140" fill="${dc}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="40">${label}</text>`,
     );
   }
 

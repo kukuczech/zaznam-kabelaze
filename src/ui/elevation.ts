@@ -3,7 +3,7 @@ import { project, saveProject, savePhoto, getPhoto, deletePhoto, undo, redo, can
 import { axisLen, distToSegment, type WallSide } from '../model/geometry';
 import { newId, type Anchor, type Dimension, type Route, type Wall, type XY } from '../model/types';
 import { connectDisto, onDistoStatus, setDistoTarget } from '../disto';
-import { dimGeomLengthMm, fromDisplay, resolveAnchor, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
+import { dimEndpoints, dimGeomLengthMm, fromDisplay, resolveAnchor, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
 import { registerCleanup, route } from '../main';
 import { mapPhotoToWall } from './photo-map';
 import { buildCostField, snapPathPx, simplifyPath, type CostField } from './chase-trace';
@@ -75,6 +75,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   let selectedRouteId: string | null = null;
   let draft: Route | null = null;
   let dimFirst: Anchor | null = null;
+  let selectedDimId: string | null = null;
   let fitVb: ViewBox = wallViewBox(W); // referenční „vejít se" = lupa 100 %; srovná se na poměr plochy v refit()
   let vb: ViewBox = { ...fitVb };
   const ZMIN = 0.5, ZMAX = 12; // rozsah lupy (0.5× … 12×)
@@ -221,6 +222,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       draftWidthMm: draft?.widthMm ?? brushWidthMm,
       backgroundHref: bgHref ?? undefined,
       backgroundOpacity: W.background?.opacity,
+      selectedDimId,
     });
     setViewBox();
   }
@@ -299,6 +301,35 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     redraw();
   }
 
+  /** Nejbližší existující kóta pod bodem p — testuje odsazenou kótovací čáru (jako se kreslí). */
+  function hitDim(p: { uMm: number; vMm: number }, tolMm: number): Dimension | null {
+    const OFF = 300; // musí sedět s odsazením v wall-svg.ts
+    const cx = L / 2, cy = W.heightMm / 2;
+    const click = toDisplay(W, side, p.uMm, p.vMm);
+    let best: Dimension | null = null;
+    let bestD = tolMm;
+    for (const dim of W.dims) {
+      const ep = dimEndpoints(W, dim);
+      if (!ep) continue;
+      const a = toDisplay(W, side, ep.a.uMm, ep.a.vMm);
+      const b = toDisplay(W, side, ep.b.uMm, ep.b.vMm);
+      const seg = Math.hypot(b.x - a.x, b.y - a.y);
+      let A: XY, B: XY;
+      if (seg < 1) {
+        A = B = { x: a.x, y: a.y }; // degenerovaná kóta = bod
+      } else {
+        const dxu = (b.x - a.x) / seg, dyu = (b.y - a.y) / seg;
+        let nx = -dyu, ny = dxu;
+        if (nx * ((a.x + b.x) / 2 - cx) + ny * ((a.y + b.y) / 2 - cy) < 0) { nx = -nx; ny = -ny; }
+        A = { x: a.x + nx * OFF, y: a.y + ny * OFF };
+        B = { x: b.x + nx * OFF, y: b.y + ny * OFF };
+      }
+      const d = distToSegment({ uMm: click.x, vMm: click.y }, A, B);
+      if (d < bestD) { bestD = d; best = dim; }
+    }
+    return best;
+  }
+
   function hitRoute(p: { uMm: number; vMm: number }, tolMm: number): Route | null {
     let best: Route | null = null;
     let bestD = tolMm;
@@ -311,63 +342,49 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     return best;
   }
 
-  function hitRoutePoint(p: { uMm: number; vMm: number }, tolMm: number): { routeId: string; index: number } | null {
-    let best: { routeId: string; index: number } | null = null;
-    let bestD = tolMm;
+  /**
+   * Kotva pod kurzorem — vybere NEJBLIŽŠÍ cíl podle skutečné vzdálenosti:
+   * vrchol/roh trasy, úsečka šlicu, a u 2. bodu i hrana stěny. Dřív měla hrana
+   * pevnou přednost a „přebíjela" šlic, kdykoli byl blízko okraje.
+   */
+  function dimAnchorAt(p: { uMm: number; vMm: number }, tolMm: number): Anchor {
+    const free: Anchor = { kind: 'point', uMm: Math.round(p.uMm), vMm: Math.round(p.vMm) };
+    const cands: { a: Anchor; d: number }[] = [];
+    const consider = (a: Anchor, d: number): void => {
+      if (d <= tolMm) cands.push({ a, d });
+    };
+
+    // vrcholy/rohy tras — malý bonus, ať jdou chytit i těsně vedle úsečky
+    const VERTEX_BONUS = 0.35 * tolMm;
     for (const r of W.routes) {
       r.points.forEach((pt, i) => {
-        const d = Math.hypot(pt.x - p.uMm, pt.y - p.vMm);
-        if (d < bestD) { bestD = d; best = { routeId: r.id, index: i }; }
+        consider({ kind: 'routePoint', routeId: r.id, index: i }, Math.hypot(pt.x - p.uMm, pt.y - p.vMm) - VERTEX_BONUS);
       });
     }
-    return best;
-  }
-
-  /** Nejbližší bod na úsečce některé trasy (kolmý průmět, oříznutý na segment). */
-  function hitRouteSeg(p: { uMm: number; vMm: number }, tolMm: number): { routeId: string; index: number; t: number } | null {
-    let best: { routeId: string; index: number; t: number } | null = null;
-    let bestD = tolMm;
+    // úsečky tras — kolmý průmět oříznutý na segment
     for (const r of W.routes) {
       for (let i = 0; i < r.points.length - 1; i++) {
         const a = r.points[i], b = r.points[i + 1];
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const len2 = dx * dx + dy * dy;
+        const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
         if (len2 === 0) continue;
-        let t = ((p.uMm - a.x) * dx + (p.vMm - a.y) * dy) / len2;
-        t = Math.min(1, Math.max(0, t));
-        const d = Math.hypot(p.uMm - (a.x + t * dx), p.vMm - (a.y + t * dy));
-        if (d < bestD) { bestD = d; best = { routeId: r.id, index: i, t }; }
+        const t = Math.min(1, Math.max(0, ((p.uMm - a.x) * dx + (p.vMm - a.y) * dy) / len2));
+        consider({ kind: 'routeSeg', routeId: r.id, index: i, t }, Math.hypot(p.uMm - (a.x + t * dx), p.vMm - (a.y + t * dy)));
       }
     }
-    return best;
-  }
-
-  function hitEdge(p: { uMm: number; vMm: number }, tolMm: number): Anchor | null {
-    // kanonické hrany; left/right v zobrazení převrátit podle strany
-    const cands: ['top' | 'bottom' | 'left' | 'right', number][] = [
-      ['top', Math.abs(W.heightMm - p.vMm)],
-      ['bottom', Math.abs(p.vMm)],
-      ['left', Math.abs(side === 'A' ? p.uMm : L - p.uMm)],
-      ['right', Math.abs(side === 'A' ? L - p.uMm : p.uMm)],
-    ];
-    cands.sort((a, b) => a[1] - b[1]);
-    if (cands[0][1] > tolMm) return null;
-    let edge = cands[0][0];
-    if (side === 'B' && (edge === 'left' || edge === 'right')) edge = edge === 'left' ? 'right' : 'left';
-    return { kind: 'edge', edge };
-  }
-
-  /** Kotva, kterou by ťuknutí v bodě p vybralo — podle fáze kótování (1. vs 2. bod). */
-  function dimAnchorAt(p: { uMm: number; vMm: number }, tolMm: number): Anchor {
-    const free: Anchor = { kind: 'point', uMm: Math.round(p.uMm), vMm: Math.round(p.vMm) };
-    const onRoute = (): Anchor | null => {
-      const rp = hitRoutePoint(p, tolMm); // vrchol/roh trasy má přednost
-      if (rp) return { kind: 'routePoint', ...rp };
-      const rs = hitRouteSeg(p, tolMm);   // jinak bod na úsečce šlicu
-      return rs ? { kind: 'routeSeg', ...rs } : null;
-    };
-    if (!dimFirst) return onRoute() ?? free;
-    return hitEdge(p, tolMm) ?? onRoute() ?? free;
+    // hrany stěny — jen pro 2. bod (left/right v zobrazení převrátit podle strany)
+    if (dimFirst) {
+      const ec: ['top' | 'bottom' | 'left' | 'right', number][] = [
+        ['top', Math.abs(W.heightMm - p.vMm)],
+        ['bottom', Math.abs(p.vMm)],
+        ['left', Math.abs(side === 'A' ? p.uMm : L - p.uMm)],
+        ['right', Math.abs(side === 'A' ? L - p.uMm : p.uMm)],
+      ];
+      ec.sort((a, b) => a[1] - b[1]);
+      let edge = ec[0][0];
+      if (side === 'B' && (edge === 'left' || edge === 'right')) edge = edge === 'left' ? 'right' : 'left';
+      consider({ kind: 'edge', edge }, ec[0][1]);
+    }
+    return cands.length ? cands.reduce((m, c) => (c.d < m.d ? c : m)).a : free;
   }
 
   /**
@@ -446,6 +463,18 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     return input;
   }
 
+  /** Uloží rozpracovaný šlic jako trasu, má-li aspoň 2 body. Vrací, zda uložil. */
+  function commitDraft(): boolean {
+    if (!draft || draft.points.length < 2) return false;
+    W.routes.push(draft);
+    selectedRouteId = draft.id;
+    saveProject();
+    return true;
+  }
+  function newDraft(): void {
+    draft = { id: newId(), categoryId, widthMm: brushWidthMm, note: '', points: [], segLengthsMm: [] };
+  }
+
   function showDrawPanel(): void {
     if (!draft) { panel.innerHTML = ''; return; }
     panel.className = 'card no-print';
@@ -467,23 +496,19 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     const undo = document.createElement('button');
     undo.textContent = '↩ Zpět bod';
     undo.onclick = () => { draft!.points.pop(); draft!.segLengthsMm.pop(); redraw(); showDrawPanel(); };
+    const next = document.createElement('button');
+    next.textContent = '＋ Nový šlic';
+    next.title = 'Uzavře tenhle šlic a začne rovnou další';
+    next.onclick = () => { commitDraft(); newDraft(); redraw(); showDrawSetupPanel(); };
     const done = document.createElement('button');
     done.className = 'primary';
     done.textContent = '✓ Hotovo';
-    done.onclick = () => {
-      if (draft!.points.length >= 2) {
-        W.routes.push(draft!);
-        selectedRouteId = draft!.id;
-        saveProject();
-      }
-      draft = null;
-      setMode('select');
-    };
+    done.onclick = () => { commitDraft(); draft = null; setMode('select'); };
     const cancel = document.createElement('button');
     cancel.className = 'danger';
     cancel.textContent = '✕ Zrušit';
     cancel.onclick = () => { draft = null; setMode('select'); };
-    row.append(undo, done, cancel);
+    row.append(undo, next, done, cancel);
     panel.appendChild(row);
   }
 
@@ -586,7 +611,9 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     panel.innerHTML = `<div class="muted">${
       dimFirst
         ? '2. bod: ťukněte na hranu stěny (strop/podlaha/okraj) nebo další bod trasy.'
-        : '1. bod: ťukněte na bod trasy (roh/konec), který chcete kótovat.'
+        : selectedDimId
+          ? 'Kóta vybrána — upravte míru v poli (nebo změřte metrem). Klik jinam začne novou kótu.'
+          : '1. bod: ťukněte na bod trasy (roh/konec), nebo na hotovou kótu pro úpravu.'
     }</div>`;
     const dims = W.dims;
     if (dims.length) {
@@ -599,17 +626,31 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         wrapEl.style.alignItems = 'center';
         wrapEl.style.gap = '4px';
         wrapEl.textContent = `k${idx + 1}:`;
+        if (d.id === selectedDimId) wrapEl.style.outline = '2px solid #fbbf24';
+        wrapEl.style.borderRadius = '6px';
+        wrapEl.style.padding = '2px 4px';
         const apply = (mm: number) => applyDimValue(d, mm);
         const input = lengthInput(d.valueMm ?? (dimGeomLengthMm(W, d) != null ? Math.round(dimGeomLengthMm(W, d)!) : null), apply);
         input.style.width = '90px';
         wrapEl.appendChild(input);
         const del = document.createElement('button');
         del.textContent = '✕';
-        del.onclick = () => { W.dims = W.dims.filter((x) => x.id !== d.id); saveProject(); redraw(); showDimPanel(); };
+        del.onclick = () => {
+          W.dims = W.dims.filter((x) => x.id !== d.id);
+          if (selectedDimId === d.id) selectedDimId = null;
+          saveProject();
+          redraw();
+          showDimPanel();
+        };
         wrapEl.appendChild(del);
         list.appendChild(wrapEl);
-        // čerstvě zanesená kóta rovnou čeká na míru z metru
-        if (d.id === focusDimId) setDistoTarget(input, apply);
+        // čerstvě zanesená / vybraná kóta rovnou čeká na míru z metru a zaostří pole
+        if (d.id === focusDimId) {
+          setDistoTarget(input, apply);
+          input.focus();
+          input.select();
+          wrapEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
       });
       panel.appendChild(list);
     }
@@ -762,14 +803,19 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   }
 
   function setMode(m: Mode): void {
+    const prev = mode;
     mode = m;
     dimFirst = null;
+    selectedDimId = null;
     clearDimHover();
     root.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach((b) => {
       b.classList.toggle('active', b.dataset.mode === m);
     });
     if (m === 'draw') {
-      draft ??= { id: newId(), categoryId, widthMm: brushWidthMm, note: '', points: [], segLengthsMm: [] };
+      // Znovu-ťuknutí na „Kreslit" (už jsme v režimu kreslení) uzavře rozpracovaný
+      // šlic a začne nový; příchod z jiného režimu rozpracovaný šlic zachová.
+      if (prev === 'draw') { commitDraft(); newDraft(); }
+      else if (!draft) newDraft();
       showDrawSetupPanel();
     } else if (m === 'select') showSelectPanel();
     else if (m === 'dim') showDimPanel();
@@ -885,12 +931,20 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       showSelectPanel();
     } else if (mode === 'dim') {
       if (!dimFirst) {
+        const existing = hitDim(p, tol * 2); // klik na hotovou kótu = editace, ne nová
+        if (existing) {
+          selectedDimId = existing.id;
+          redraw();
+          showDimPanel(existing.id);
+          return;
+        }
         dimFirst = dimAnchorAt(p, tol * 2);
         showDimPanel();
       } else {
         const dim: Dimension = { id: newId(), from: dimFirst, to: dimAnchorAt(p, tol * 2), valueMm: null };
         W.dims.push(dim);
         dimFirst = null;
+        selectedDimId = dim.id;
         clearDimHover();
         saveProject();
         redraw();
