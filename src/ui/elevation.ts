@@ -75,7 +75,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   let selectedRouteId: string | null = null;
   let draft: Route | null = null;
   let dimFirst: Anchor | null = null;
-  const fitVb: ViewBox = wallViewBox(W); // referenční „vejít se" = lupa 100 %
+  let fitVb: ViewBox = wallViewBox(W); // referenční „vejít se" = lupa 100 %; srovná se na poměr plochy v refit()
   let vb: ViewBox = { ...fitVb };
   const ZMIN = 0.5, ZMAX = 12; // rozsah lupy (0.5× … 12×)
   let categoryId = project.categories[0]?.id ?? '';
@@ -179,6 +179,37 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   zoomSlider.addEventListener('input', () => zoomTo(sliderToZoom(Number(zoomSlider.value))));
   (root.querySelector('#zin') as HTMLButtonElement).addEventListener('click', () => zoomTo(zoomNow() * 1.4));
   (root.querySelector('#zout') as HTMLButtonElement).addEventListener('click', () => zoomTo(zoomNow() / 1.4));
+
+  /** „Vejít se" box rozšířený na poměr stran plochy, aby preserveAspectRatio nic neolemoval. */
+  function computeFitVb(): ViewBox {
+    const base = wallViewBox(W); // stěna + okraj, vycentrovaná
+    const rect = svg.getBoundingClientRect();
+    const elAsp = rect.width > 1 && rect.height > 1 ? rect.width / rect.height : base.w / base.h;
+    const baseAsp = base.w / base.h;
+    let { x, y, w, h } = base;
+    if (elAsp > baseAsp) { const nw = h * elAsp; x -= (nw - w) / 2; w = nw; }
+    else { const nh = w / elAsp; y -= (nh - h) / 2; h = nh; }
+    return { x, y, w, h };
+  }
+
+  /**
+   * Sladí viewBox s poměrem stran plochy a zachová přiblížení i střed. Bez toho by
+   * default preserveAspectRatio="meet" obraz vycentroval s prázdnými pruhy a lineární
+   * přepočet myš→stěna by byl posunutý/škálovaný („přemapování z celé obrazovky").
+   */
+  function refit(): void {
+    const z = zoomNow();
+    const cx = vb.x + vb.w / 2, cy = vb.y + vb.h / 2;
+    fitVb = computeFitVb();
+    const nw = fitVb.w / z, nh = fitVb.h / z;
+    vb = { w: nw, h: nh, x: cx - nw / 2, y: cy - nh / 2 };
+    setViewBox();
+    syncZoom();
+  }
+
+  const containerRO = new ResizeObserver(() => refit());
+  containerRO.observe(svg);
+  registerCleanup(() => containerRO.disconnect());
 
   function redraw(): void {
     svg.innerHTML = wallSvgContent(W, {
@@ -317,7 +348,11 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     return rp ? { kind: 'routePoint', ...rp } : free;
   }
 
-  /** SVG zvýraznění kotvy (hrana = pruh, bod trasy = celá trasa + kroužek, volný bod = křížek). */
+  /**
+   * SVG zvýraznění kotvy jen pro skutečný cíl přichycení (hrana = pruh,
+   * bod trasy = celá trasa + kroužek). Volný bod záměrně nekreslíme — jinak by
+   * jeho značka jezdila za kurzorem jako druhá „pomalá myš".
+   */
   function anchorHighlightSvg(a: Anchor, color: string): string {
     if (a.kind === 'edge') {
       const e = a.edge;
@@ -340,9 +375,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       return `<path d="${d}" stroke="${color}" stroke-width="${Math.max(r.widthMm, 30) + 60}" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>`
         + `<circle cx="${c.x}" cy="${c.y}" r="90" fill="none" stroke="${color}" stroke-width="26"/>`;
     }
-    const c = toDisplay(W, side, a.uMm, a.vMm);
-    return `<circle cx="${c.x}" cy="${c.y}" r="55" fill="${color}" opacity="0.5"/>`
-      + `<path d="M ${c.x - 130} ${c.y} H ${c.x + 130} M ${c.x} ${c.y - 130} V ${c.y + 130}" stroke="${color}" stroke-width="14"/>`;
+    return ''; // volný bod: bez značky
   }
 
   // Vrstva živého zvýraznění při kótování (mimo hlavní redraw, aktualizuje se při pohybu myši).
@@ -513,7 +546,8 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     panel.appendChild(note);
   }
 
-  function showDimPanel(): void {
+  /** @param focusDimId ID kóty, jejíž políčko se rovnou nastaví jako cíl metru (podbarví se). */
+  function showDimPanel(focusDimId?: string): void {
     panel.className = 'card no-print';
     panel.innerHTML = `<div class="muted">${
       dimFirst
@@ -531,7 +565,8 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         wrapEl.style.alignItems = 'center';
         wrapEl.style.gap = '4px';
         wrapEl.textContent = `k${idx + 1}:`;
-        const input = lengthInput(d.valueMm ?? (dimGeomLengthMm(W, d) != null ? Math.round(dimGeomLengthMm(W, d)!) : null), (mm) => applyDimValue(d, mm));
+        const apply = (mm: number) => applyDimValue(d, mm);
+        const input = lengthInput(d.valueMm ?? (dimGeomLengthMm(W, d) != null ? Math.round(dimGeomLengthMm(W, d)!) : null), apply);
         input.style.width = '90px';
         wrapEl.appendChild(input);
         const del = document.createElement('button');
@@ -539,6 +574,8 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         del.onclick = () => { W.dims = W.dims.filter((x) => x.id !== d.id); saveProject(); redraw(); showDimPanel(); };
         wrapEl.appendChild(del);
         list.appendChild(wrapEl);
+        // čerstvě zanesená kóta rovnou čeká na míru z metru
+        if (d.id === focusDimId) setDistoTarget(input, apply);
       });
       panel.appendChild(list);
     }
@@ -823,7 +860,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         clearDimHover();
         saveProject();
         redraw();
-        showDimPanel();
+        showDimPanel(dim.id);
       }
     }
   });
