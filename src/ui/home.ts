@@ -90,14 +90,19 @@ export async function renderHome(root: HTMLElement): Promise<void> {
   root.querySelector<HTMLInputElement>('#ifc-file')!.addEventListener('change', async (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
+    const label = root.querySelector('#ifc-file')!.parentElement as HTMLElement;
+    const origText = label.textContent;
+    label.textContent = '⏳ Importuji…';
     try {
       const storey = await importIfc(file);
       project.storeys.push(storey);
       saveProject();
-      renderHome(root);
+      // Rovnou otevřít 3D model — ať je jasné, že se import povedl.
+      location.hash = `#/storey/${storey.id}`;
     } catch (err) {
       alert(`Import IFC selhal: ${err}`);
       console.error(err);
+      label.textContent = origText;
     }
   });
 

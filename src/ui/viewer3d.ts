@@ -95,6 +95,25 @@ export async function renderViewer3d(root: HTMLElement, storeyId: string): Promi
   controls.target.copy(center);
   controls.maxPolarAngle = Math.PI / 2 - 0.05;
 
+  // Render on-demand: nespoléháme na trvalou rAF smyčku (prohlížeč ji na skryté
+  // kartě / uspaném mobilu pozastaví → černý canvas). Kreslíme při každé změně.
+  let renderQueued = false;
+  function requestRender(): void {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => {
+      renderQueued = false;
+      controls.update();
+      renderer.render(scene, camera);
+    });
+  }
+  // Fallback, kdyby rAF byl pozastavený: vykreslit i synchronně teď hned.
+  function renderNow(): void {
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  controls.addEventListener('change', requestRender);
+
   // Výběr stěny tapem
   const raycaster = new THREE.Raycaster();
   let selected: THREE.Mesh | null = null;
@@ -131,6 +150,7 @@ export async function renderViewer3d(root: HTMLElement, storeyId: string): Promi
     openBtn.textContent = `Otevřít ${wall.name} →`;
     openBtn.style.display = '';
     openBtn.onclick = () => (location.hash = `#/wall/${wall.id}/${selectedSide}`);
+    requestRender();
   });
 
   function resize(): void {
@@ -139,25 +159,19 @@ export async function renderViewer3d(root: HTMLElement, storeyId: string): Promi
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    renderNow();
   }
   const ro = new ResizeObserver(resize);
   ro.observe(wrap);
   resize();
+  renderNow(); // první snímek hned, i kdyby rAF byl pozastavený
 
   if (import.meta.env.DEV) {
-    (window as any).__viewer = { scene, camera, wallMeshes, bbox, center, size };
+    (window as any).__viewer = { scene, camera, wallMeshes, bbox, center, size, renderer, controls, renderNow };
   }
 
-  let running = true;
-  renderer.setAnimationLoop(() => {
-    if (!running) return;
-    controls.update();
-    renderer.render(scene, camera);
-  });
-
   registerCleanup(() => {
-    running = false;
-    renderer.setAnimationLoop(null);
+    controls.removeEventListener('change', requestRender);
     ro.disconnect();
     controls.dispose();
     renderer.dispose();
