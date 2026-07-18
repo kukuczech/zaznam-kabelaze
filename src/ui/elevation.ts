@@ -413,8 +413,12 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       const pts = r.points.map((q) => toDisplay(W, side, q.x, q.y));
       const d = pts.map((q, i) => `${i ? 'L' : 'M'} ${q.x} ${q.y}`).join(' ');
       const c = toDisplay(W, side, pt.uMm, pt.vMm);
-      return `<path d="${d}" stroke="${color}" stroke-width="${Math.max(r.widthMm, 30) + 60}" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>`
-        + `<circle cx="${c.x}" cy="${c.y}" r="90" fill="none" stroke="${color}" stroke-width="26"/>`;
+      const routeGlow = `<path d="${d}" stroke="${color}" stroke-width="${Math.max(r.widthMm, 30) + 60}" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.3"/>`;
+      // uzel (bod, kam jsi klikal) = plný puntík; bod na úsečce = prstenec
+      const marker = a.kind === 'routePoint'
+        ? `<circle cx="${c.x}" cy="${c.y}" r="85" fill="${color}" stroke="#0f172a" stroke-width="14"/>`
+        : `<circle cx="${c.x}" cy="${c.y}" r="90" fill="none" stroke="${color}" stroke-width="26"/>`;
+      return routeGlow + marker;
     }
     return ''; // volný bod: bez značky
   }
