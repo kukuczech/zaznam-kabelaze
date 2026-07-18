@@ -3,7 +3,6 @@
 // Koncept „aktivního cíle": tapnuté číselné pole přijme příští naměřenou hodnotu.
 
 const SERVICE = '3ab10100-f831-4395-b29d-570977d5bf94';
-const CHAR_MEASURE = '3ab10101-f831-4395-b29d-570977d5bf94';
 
 export type DistoStatus = 'disconnected' | 'connecting' | 'connected';
 
@@ -45,12 +44,7 @@ export function clearDistoTarget(input?: HTMLInputElement): void {
   target = null;
 }
 
-function onMeasurement(event: Event): void {
-  const dv = (event.target as BluetoothRemoteGATTCharacteristic).value;
-  if (!dv || dv.byteLength < 4) return;
-  const meters = dv.getFloat32(0, true);
-  if (!isFinite(meters) || meters <= 0) return;
-  const mm = Math.round(meters * 1000);
+function applyMm(mm: number): void {
   if (target && document.contains(target.input)) {
     target.input.value = String(mm);
     target.apply(mm);
@@ -59,14 +53,63 @@ function onMeasurement(event: Event): void {
   }
 }
 
+/** Zkusí z DataView vytáhnout věrohodnou vzdálenost (metry) různými formáty. */
+function parseMeters(dv: DataView): number | null {
+  // float32 LE v metrech (standardní DISTO)
+  if (dv.byteLength >= 4) {
+    const f = dv.getFloat32(0, true);
+    if (isFinite(f) && f > 0 && f < 200) return f;
+  }
+  // float32 LE s offsetem (některé firmwary přidávají 1B hlavičku)
+  if (dv.byteLength >= 5) {
+    const f = dv.getFloat32(1, true);
+    if (isFinite(f) && f > 0 && f < 200) return f;
+  }
+  // float64 LE
+  if (dv.byteLength >= 8) {
+    const d = dv.getFloat64(0, true);
+    if (isFinite(d) && d > 0 && d < 200) return d;
+  }
+  return null;
+}
+
+function hex(dv: DataView): string {
+  return Array.from(new Uint8Array(dv.buffer)).map((b) => b.toString(16).padStart(2, '0')).join(' ');
+}
+
+function onMeasurement(event: Event): void {
+  const ch = event.target as BluetoothRemoteGATTCharacteristic;
+  const dv = ch.value;
+  if (!dv) return;
+  const meters = parseMeters(dv);
+  console.log(`[DISTO] ${ch.uuid} (${dv.byteLength} B): ${hex(dv)} → ${meters != null ? meters.toFixed(3) + ' m' : 'nerozpoznáno'}`);
+  if (meters == null) return;
+  applyMm(Math.round(meters * 1000));
+}
+
 async function subscribe(): Promise<void> {
   if (!device?.gatt) return;
   setStatus('connecting');
   const server = await device.gatt.connect();
   const service = await server.getPrimaryService(SERVICE);
-  const ch = await service.getCharacteristic(CHAR_MEASURE);
-  await ch.startNotifications();
-  ch.addEventListener('characteristicvaluechanged', onMeasurement);
+  // Diagnostika: napojíme se na VŠECHNY notify/indicate charakteristiky služby,
+  // ať zachytíme měření i kdyby D2G posílal na jiné UUID než D2.
+  const chars = await service.getCharacteristics();
+  let subscribed = 0;
+  for (const ch of chars) {
+    const p = ch.properties;
+    console.log(`[DISTO] char ${ch.uuid} — notify:${p.notify} indicate:${p.indicate} read:${p.read} write:${p.write}`);
+    if (p.notify || p.indicate) {
+      try {
+        await ch.startNotifications();
+        ch.addEventListener('characteristicvaluechanged', onMeasurement);
+        subscribed++;
+      } catch (e) {
+        console.warn(`[DISTO] startNotifications selhalo na ${ch.uuid}:`, e);
+      }
+    }
+  }
+  console.log(`[DISTO] napojeno na ${subscribed} charakteristik. Zmáčkni tlačítko na metru.`);
   setStatus('connected');
 }
 
