@@ -1,0 +1,5 @@
+node_modules/
+dist/
+public/web-ifc.wasm
+testdata/
+*.local
