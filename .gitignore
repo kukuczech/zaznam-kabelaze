@@ -3,3 +3,4 @@ dist/
 public/web-ifc.wasm
 testdata/
 *.local
+public/testdata/

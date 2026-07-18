@@ -19,6 +19,8 @@ export interface Storey {
   /** Výchozí výška stěn podlaží (mm) — fallback, každá stěna má vlastní. */
   wallHeightMm: number;
   walls: Wall[];
+  /** Půdorysné polygony podlah (IFCSLAB) — jen pro orientaci ve 3D. */
+  slabs?: XY[][];
 }
 
 export interface Wall {
@@ -36,6 +38,7 @@ export interface Wall {
   dims: Dimension[];
 }
 
+/** Otvor ve stěně; (uMm, vMm) je STŘED otvoru v souřadnicích stěny. */
 export interface Opening {
   kind: 'door' | 'window';
   uMm: number;
