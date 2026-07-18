@@ -76,6 +76,9 @@ export interface WallSvgOptions {
   draftColor?: string;
   draftWidthMm?: number;
   forPrint?: boolean;
+  /** Narovnaná fotka jako podklad (objectURL nebo data URL) vyplňující obdélník stěny. */
+  backgroundHref?: string;
+  backgroundOpacity?: number;
 }
 
 export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
@@ -85,6 +88,14 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
   const print = !!opts.forPrint;
   const line = print ? '#333' : '#64748b';
   const parts: string[] = [];
+
+  // Podklad — narovnaná fotka stěny (pod vším ostatním)
+  if (opts.backgroundHref) {
+    const op = opts.backgroundOpacity ?? 0.6;
+    parts.push(
+      `<image href="${opts.backgroundHref}" x="0" y="0" width="${len}" height="${H}" opacity="${op}" preserveAspectRatio="none"/>`,
+    );
+  }
 
   // Mřížka po 500 mm
   const grid: string[] = [];

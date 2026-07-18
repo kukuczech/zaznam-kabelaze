@@ -36,6 +36,15 @@ export interface Wall {
   photoIds: string[];
   routes: Route[];
   dims: Dimension[];
+  /** Perspektivně narovnaná fotka stěny položená jako podklad čelního pohledu. */
+  background?: WallBackground;
+}
+
+export interface WallBackground {
+  /** ID narovnaného obrázku v úložišti fotek (savePhoto/getPhoto). */
+  photoId: string;
+  /** Průhlednost podkladu 0–1. */
+  opacity: number;
 }
 
 /** Otvor ve stěně; (uMm, vMm) je STŘED otvoru v souřadnicích stěny. */

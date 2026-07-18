@@ -3,8 +3,10 @@ import { project, saveProject, savePhoto, getPhoto, deletePhoto } from '../db';
 import { axisLen, distToSegment, type WallSide } from '../model/geometry';
 import { newId, type Anchor, type Dimension, type Route, type Wall, type XY } from '../model/types';
 import { connectDisto, onDistoStatus, setDistoTarget } from '../disto';
-import { dimGeomLengthMm, fromDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
+import { dimGeomLengthMm, fromDisplay, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
 import { registerCleanup } from '../main';
+import { mapPhotoToWall } from './photo-map';
+import { buildCostField, snapPathPx, type CostField } from './chase-trace';
 
 type Mode = 'select' | 'draw' | 'dim' | 'photo';
 
@@ -33,6 +35,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       <button data-mode="dim">📏 Kóta</button>
       <button data-mode="photo">🖼️ Fotky</button>
       <button id="ortho" class="active">⊾ Pravé úhly</button>
+      <button id="snap">🧲 Šlic</button>
     </div>`;
 
   root.querySelector('#back')!.addEventListener('click', () => (location.hash = `#/storey/${storeyId}`));
@@ -56,8 +59,53 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   let vb: ViewBox = wallViewBox(W);
   let categoryId = project.categories[0]?.id ?? '';
   let brushWidthMm = 60;
+  let snap = false; // magnetické přichytávání trasy na tmavý šlic v podkladu
+  let costField: CostField | null = null;
+  let costFieldPhotoId: string | null = null;
 
   const catById = (id: string) => project.categories.find((c) => c.id === id);
+
+  // --- magnetické trasování šlicu ---
+  async function ensureCostField(): Promise<void> {
+    if (!W.background) { costField = null; costFieldPhotoId = null; return; }
+    if (costField && costFieldPhotoId === W.background.photoId) return;
+    const blob = await getPhoto(W.background.photoId);
+    costField = blob ? await buildCostField(blob) : null;
+    costFieldPhotoId = W.background.photoId;
+  }
+  function invalidateCostField(): void { costField = null; costFieldPhotoId = null; }
+
+  /** Bod stěny (u, v mm) → pixel rastru podkladu (přes zobrazovací souřadnice). */
+  function wallToPx(uMm: number, vMm: number): { x: number; y: number } {
+    const d = toDisplay(W, side, uMm, vMm);
+    return { x: (d.x / L) * costField!.w, y: (d.y / W.heightMm) * costField!.h };
+  }
+  /** Pixel rastru → bod stěny (u, v mm), oříznutý do rozměrů stěny. */
+  function pxToWall(x: number, y: number): XY {
+    const w = fromDisplay(W, side, (x / costField!.w) * L, (y / costField!.h) * W.heightMm);
+    return { x: Math.round(Math.min(Math.max(w.uMm, 0), L)), y: Math.round(Math.min(Math.max(w.vMm, 0), W.heightMm)) };
+  }
+  /** Magneticky přichycená lomená čára z prev do bodu p (bez počátku prev). */
+  function snapDraftPath(prev: XY, p: { uMm: number; vMm: number }): XY[] {
+    const a = wallToPx(prev.x, prev.y);
+    const b = wallToPx(Math.min(Math.max(p.uMm, 0), L), Math.min(Math.max(p.vMm, 0), W.heightMm));
+    const px = snapPathPx(costField!, a, b);
+    const out: XY[] = [];
+    for (let i = 1; i < px.length; i++) out.push(pxToWall(px[i].x, px[i].y));
+    if (out.length === 0) out.push({ x: Math.round(Math.min(Math.max(p.uMm, 0), L)), y: Math.round(Math.min(Math.max(p.vMm, 0), W.heightMm)) });
+    return out;
+  }
+
+  // --- podklad (narovnaná fotka stěny) ---
+  let bgHref: string | null = null;
+  async function loadBackground(): Promise<void> {
+    if (bgHref) { URL.revokeObjectURL(bgHref); bgHref = null; }
+    if (W.background) {
+      const blob = await getPhoto(W.background.photoId);
+      if (blob) bgHref = URL.createObjectURL(blob);
+    }
+  }
+  registerCleanup(() => { if (bgHref) URL.revokeObjectURL(bgHref); });
 
   function setViewBox(): void {
     svg.setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
@@ -71,6 +119,8 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       draftPoints: draft?.points,
       draftColor: catById(draft?.categoryId ?? categoryId)?.color,
       draftWidthMm: draft?.widthMm ?? brushWidthMm,
+      backgroundHref: bgHref ?? undefined,
+      backgroundOpacity: W.background?.opacity,
     });
     setViewBox();
   }
@@ -366,9 +416,58 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     }
   }
 
+  /** Otevře editor napasování se zdrojovým blobem a uloží narovnaný podklad. */
+  async function mapAsBackground(sourceBlob: Blob): Promise<void> {
+    const rectified = await mapPhotoToWall(sourceBlob, L / W.heightMm);
+    if (!rectified) return;
+    if (W.background) await deletePhoto(W.background.photoId);
+    const id = newId();
+    await savePhoto(id, rectified);
+    W.background = { photoId: id, opacity: W.background?.opacity ?? 0.6 };
+    saveProject();
+    invalidateCostField();
+    await loadBackground();
+    redraw();
+    showPhotoPanel();
+  }
+
   async function showPhotoPanel(): Promise<void> {
     panel.className = 'card no-print';
     panel.innerHTML = '';
+
+    // Ovládání podkladu
+    if (W.background) {
+      const bg = document.createElement('div');
+      bg.className = 'row';
+      bg.style.cssText = 'align-items:center;gap:10px;margin-bottom:8px';
+      const slider = document.createElement('input');
+      slider.type = 'range';
+      slider.min = '0'; slider.max = '100';
+      slider.value = String(Math.round(W.background.opacity * 100));
+      slider.style.flex = '1';
+      slider.addEventListener('input', () => {
+        if (W.background) W.background.opacity = Number(slider.value) / 100;
+        redraw();
+      });
+      slider.addEventListener('change', () => saveProject());
+      const rm = document.createElement('button');
+      rm.className = 'danger';
+      rm.textContent = '✕ Odebrat podklad';
+      rm.onclick = async () => {
+        if (W.background) await deletePhoto(W.background.photoId);
+        W.background = undefined;
+        saveProject();
+        invalidateCostField();
+        snap = false;
+        snapBtn.classList.remove('active');
+        await loadBackground();
+        redraw();
+        showPhotoPanel();
+      };
+      bg.append(Object.assign(document.createElement('span'), { textContent: '🌫️ Průhlednost podkladu' }), slider, rm);
+      panel.appendChild(bg);
+    }
+
     const row = document.createElement('div');
     row.className = 'row';
     for (const id of W.photoIds) {
@@ -382,7 +481,15 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         ov.style.cssText = 'position:fixed;inset:0;background:#000d;z-index:99;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px';
         const big = document.createElement('img');
         big.src = img.src;
-        big.style.cssText = 'max-width:100%;max-height:85%';
+        big.style.cssText = 'max-width:100%;max-height:78%';
+        const mapBtn = document.createElement('button');
+        mapBtn.className = 'primary';
+        mapBtn.textContent = '🗺️ Napasovat na stěnu';
+        mapBtn.onclick = async (e) => {
+          e.stopPropagation();
+          ov.remove();
+          await mapAsBackground(blob);
+        };
         const delBtn = document.createElement('button');
         delBtn.className = 'danger';
         delBtn.textContent = '🗑 Smazat fotku';
@@ -396,24 +503,41 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
           showPhotoPanel();
         };
         ov.onclick = () => ov.remove();
-        ov.append(big, delBtn);
+        const btns = document.createElement('div');
+        btns.style.cssText = 'display:flex;gap:8px';
+        btns.append(mapBtn, delBtn);
+        ov.append(big, btns);
         document.body.appendChild(ov);
       };
       row.appendChild(img);
     }
-    const add = document.createElement('label');
-    add.className = 'btn';
-    add.innerHTML = '📷 Přidat<input type="file" accept="image/*" hidden multiple />';
-    add.querySelector('input')!.addEventListener('change', async (e) => {
-      for (const f of Array.from((e.target as HTMLInputElement).files ?? [])) {
+
+    // Přidání fotek: soubory + přímé focení (mobil)
+    const addFiles = async (files: FileList | null, mapFirst: boolean): Promise<void> => {
+      const arr = Array.from(files ?? []);
+      let firstBlob: Blob | null = null;
+      for (const f of arr) {
         const id = newId();
         await savePhoto(id, f);
         W.photoIds.push(id);
+        firstBlob ??= f;
       }
       saveProject();
-      showPhotoPanel();
-    });
-    row.appendChild(add);
+      if (mapFirst && firstBlob) await mapAsBackground(firstBlob);
+      else showPhotoPanel();
+    };
+
+    const add = document.createElement('label');
+    add.className = 'btn';
+    add.innerHTML = '📁 Nahrát<input type="file" accept="image/*" hidden multiple />';
+    add.querySelector('input')!.addEventListener('change', (e) => addFiles((e.target as HTMLInputElement).files, false));
+
+    const shoot = document.createElement('label');
+    shoot.className = 'btn';
+    shoot.innerHTML = '📷 Vyfotit a napasovat<input type="file" accept="image/*" capture="environment" hidden />';
+    shoot.querySelector('input')!.addEventListener('change', (e) => addFiles((e.target as HTMLInputElement).files, true));
+
+    row.append(add, shoot);
     panel.appendChild(row);
   }
 
@@ -439,6 +563,24 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   orthoBtn.addEventListener('click', () => {
     ortho = !ortho;
     orthoBtn.classList.toggle('active', ortho);
+  });
+  const snapBtn = root.querySelector('#snap') as HTMLButtonElement;
+  snapBtn.addEventListener('click', async () => {
+    if (!snap) {
+      if (!W.background) {
+        alert('Nejdřív napasuj fotku stěny (🖼️ Fotky → Napasovat). Přichytávání pak povede linku po tmavém šlicu.');
+        return;
+      }
+      snapBtn.disabled = true;
+      const orig = snapBtn.textContent;
+      snapBtn.textContent = '⏳ …';
+      try { await ensureCostField(); } finally { snapBtn.disabled = false; snapBtn.textContent = orig; }
+      if (!costField) { alert('Podklad se nepodařilo načíst.'); return; }
+      snap = true;
+    } else {
+      snap = false;
+    }
+    snapBtn.classList.toggle('active', snap);
   });
 
   // --- pointer interakce: tap / pan / pinch ---
@@ -498,8 +640,12 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
 
     if (mode === 'draw' && draft) {
       const prev = draft.points[draft.points.length - 1] ?? null;
-      draft.points.push(snapPoint(p, prev));
-      if (draft.points.length >= 2) draft.segLengthsMm.push(null);
+      if (snap && costField && prev) {
+        for (const q of snapDraftPath(prev, p)) { draft.points.push(q); draft.segLengthsMm.push(null); }
+      } else {
+        draft.points.push(snapPoint(p, prev));
+        if (draft.points.length >= 2) draft.segLengthsMm.push(null);
+      }
       redraw();
       showDrawPanel();
     } else if (mode === 'select') {
@@ -536,5 +682,6 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     setViewBox();
   }, { passive: false });
 
+  await loadBackground();
   setMode('select');
 }
