@@ -158,21 +158,54 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
     for (const p of pts) parts.push(`<circle cx="${p.x}" cy="${p.y}" r="50" fill="${opts.draftColor ?? '#22d3ee'}"/>`);
   }
 
-  // Kóty
+  // Kóty — klasické technické kótování: vynášecí čáry, odsazená kótovací čára
+  // se šipkami na obou koncích a popiskem vzdálenosti nad ní.
+  const dimColor = print ? '#000' : '#fbbf24';
+  const cx = len / 2, cy = H / 2;
+  const OFF = 300;   // odsazení kótovací čáry od měřeného úseku (mm)
+  const OVER = 90;   // přesah vynášecí čáry za kótovací čáru
+  const GAP = 40;    // mezera mezi měřeným bodem a začátkem vynášecí čáry
+  const arrow = (px: number, py: number, dx: number, dy: number): string => {
+    // šipka: hrot v (px,py), míří ven ve směru (dx,dy)
+    const AL = 130, AW = 45;
+    const bx = px - dx * AL, by = py - dy * AL;
+    const nx = -dy, ny = dx;
+    return `<path d="M ${px} ${py} L ${bx + nx * AW} ${by + ny * AW} L ${bx - nx * AW} ${by - ny * AW} Z" fill="${dimColor}"/>`;
+  };
   for (const dim of wall.dims) {
     const ep = dimEndpoints(wall, dim);
     if (!ep) continue;
     const a = toDisplay(wall, side, ep.a.uMm, ep.a.vMm);
     const b = toDisplay(wall, side, ep.b.uMm, ep.b.vMm);
     const value = dim.valueMm ?? Math.round(Math.hypot(ep.b.uMm - ep.a.uMm, ep.b.vMm - ep.a.vMm));
-    const mx = (a.x + b.x) / 2;
-    const my = (a.y + b.y) / 2;
-    const dimColor = print ? '#000' : '#fbbf24';
+    const label = `${value}${dim.valueMm == null ? '?' : ''}`;
+    const seg = Math.hypot(b.x - a.x, b.y - a.y);
+    if (seg < 1) {
+      parts.push(
+        `<circle cx="${a.x}" cy="${a.y}" r="35" fill="${dimColor}" data-dim="${dim.id}"/>`,
+        `<text x="${a.x}" y="${a.y - 60}" text-anchor="middle" font-size="140" fill="${dimColor}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="40">${label}</text>`,
+      );
+      continue;
+    }
+    const dxu = (b.x - a.x) / seg, dyu = (b.y - a.y) / seg; // jednotkový směr a→b
+    let nx = -dyu, ny = dxu;                                // kolmice ke kótovací čáře
+    // odsadit směrem ven ze středu stěny, ať kóta nekříží geometrii
+    if (nx * ((a.x + b.x) / 2 - cx) + ny * ((a.y + b.y) / 2 - cy) < 0) { nx = -nx; ny = -ny; }
+    const aX = a.x + nx * OFF, aY = a.y + ny * OFF;         // konce kótovací čáry
+    const bX = b.x + nx * OFF, bY = b.y + ny * OFF;
+    let ang = Math.atan2(dyu, dxu) * 180 / Math.PI;         // popisek podél čáry, vzhůru nohama otočit
+    if (ang > 90) ang -= 180; else if (ang < -90) ang += 180;
+    const tX = (aX + bX) / 2 + nx * 95, tY = (aY + bY) / 2 + ny * 95;
     parts.push(
-      `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}" stroke="${dimColor}" stroke-width="10" data-dim="${dim.id}"/>`,
-      `<circle cx="${a.x}" cy="${a.y}" r="35" fill="${dimColor}"/>`,
-      `<circle cx="${b.x}" cy="${b.y}" r="35" fill="${dimColor}"/>`,
-      `<text x="${mx}" y="${my - 50}" text-anchor="middle" font-size="140" fill="${dimColor}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="40">${value}${dim.valueMm == null ? '?' : ''}</text>`,
+      // vynášecí čáry (od měřených bodů přes kótovací čáru s malým přesahem)
+      `<line x1="${a.x + nx * GAP}" y1="${a.y + ny * GAP}" x2="${a.x + nx * (OFF + OVER)}" y2="${a.y + ny * (OFF + OVER)}" stroke="${dimColor}" stroke-width="6"/>`,
+      `<line x1="${b.x + nx * GAP}" y1="${b.y + ny * GAP}" x2="${b.x + nx * (OFF + OVER)}" y2="${b.y + ny * (OFF + OVER)}" stroke="${dimColor}" stroke-width="6"/>`,
+      // kótovací čára + šipky mířící ven k vynášecím čárám
+      `<line x1="${aX}" y1="${aY}" x2="${bX}" y2="${bY}" stroke="${dimColor}" stroke-width="8" data-dim="${dim.id}"/>`,
+      arrow(aX, aY, -dxu, -dyu),
+      arrow(bX, bY, dxu, dyu),
+      // popisek vzdálenosti nad kótovací čárou
+      `<text x="${tX}" y="${tY}" text-anchor="middle" dominant-baseline="central" transform="rotate(${ang.toFixed(1)} ${tX} ${tY})" font-size="140" fill="${dimColor}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="40">${label}</text>`,
     );
   }
 

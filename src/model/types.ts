@@ -45,6 +45,10 @@ export interface WallBackground {
   photoId: string;
   /** Průhlednost podkladu 0–1. */
   opacity: number;
+  /** ID původní (nenarovnané) fotky — umožňuje pozdější doladění perspektivy. */
+  sourcePhotoId?: string;
+  /** Rohy stěny označené ve zdrojové fotce (px zdroje, pořadí TL,TR,BR,BL). */
+  corners?: XY[];
 }
 
 /** Otvor ve stěně; (uMm, vMm) je STŘED otvoru v souřadnicích stěny. */

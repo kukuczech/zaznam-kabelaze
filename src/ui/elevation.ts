@@ -416,14 +416,19 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     }
   }
 
-  /** Otevře editor napasování se zdrojovým blobem a uloží narovnaný podklad. */
-  async function mapAsBackground(sourceBlob: Blob): Promise<void> {
-    const rectified = await mapPhotoToWall(sourceBlob, L / W.heightMm);
-    if (!rectified) return;
+  /** Otevře editor napasování a uloží narovnaný podklad (+ zdroj a rohy pro doladění). */
+  async function mapAsBackground(sourceBlob: Blob, sourcePhotoId?: string, initialCorners?: XY[]): Promise<void> {
+    const result = await mapPhotoToWall(sourceBlob, L / W.heightMm, initialCorners);
+    if (!result) return;
     if (W.background) await deletePhoto(W.background.photoId);
     const id = newId();
-    await savePhoto(id, rectified);
-    W.background = { photoId: id, opacity: W.background?.opacity ?? 0.6 };
+    await savePhoto(id, result.blob);
+    W.background = {
+      photoId: id,
+      opacity: W.background?.opacity ?? 0.6,
+      sourcePhotoId: sourcePhotoId ?? W.background?.sourcePhotoId,
+      corners: result.corners,
+    };
     saveProject();
     invalidateCostField();
     await loadBackground();
@@ -464,7 +469,22 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         redraw();
         showPhotoPanel();
       };
-      bg.append(Object.assign(document.createElement('span'), { textContent: '🌫️ Průhlednost podkladu' }), slider, rm);
+      bg.append(Object.assign(document.createElement('span'), { textContent: '🌫️ Průhlednost podkladu' }), slider);
+      // Doladění perspektivy — znovu otevře editor s původní fotkou a rohy.
+      if (W.background.sourcePhotoId) {
+        const tune = document.createElement('button');
+        tune.className = 'primary';
+        tune.textContent = '🔧 Doladit perspektivu';
+        tune.onclick = async () => {
+          const bgn = W.background;
+          if (!bgn?.sourcePhotoId) return;
+          const src = await getPhoto(bgn.sourcePhotoId);
+          if (!src) { alert('Původní fotka už není k dispozici (asi byla smazána).'); return; }
+          await mapAsBackground(src, bgn.sourcePhotoId, bgn.corners);
+        };
+        bg.append(tune);
+      }
+      bg.append(rm);
       panel.appendChild(bg);
     }
 
@@ -488,7 +508,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         mapBtn.onclick = async (e) => {
           e.stopPropagation();
           ov.remove();
-          await mapAsBackground(blob);
+          await mapAsBackground(blob, id);
         };
         const delBtn = document.createElement('button');
         delBtn.className = 'danger';
@@ -516,14 +536,15 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     const addFiles = async (files: FileList | null, mapFirst: boolean): Promise<void> => {
       const arr = Array.from(files ?? []);
       let firstBlob: Blob | null = null;
+      let firstId: string | null = null;
       for (const f of arr) {
         const id = newId();
         await savePhoto(id, f);
         W.photoIds.push(id);
-        firstBlob ??= f;
+        if (!firstBlob) { firstBlob = f; firstId = id; }
       }
       saveProject();
-      if (mapFirst && firstBlob) await mapAsBackground(firstBlob);
+      if (mapFirst && firstBlob) await mapAsBackground(firstBlob, firstId ?? undefined);
       else showPhotoPanel();
     };
 

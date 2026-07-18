@@ -98,29 +98,54 @@ async function blobToImage(blob: Blob): Promise<HTMLImageElement> {
   }
 }
 
+export interface MapResult {
+  blob: Blob;
+  /** Označené rohy ve zdrojové fotce (px, pořadí TL,TR,BR,BL) pro pozdější doladění. */
+  corners: Pt[];
+}
+
+/** Výstupní rozlišení podle poměru stran stěny, delší strana = long. */
+function outSize(aspect: number, long: number): { w: number; h: number } {
+  return aspect >= 1 ? { w: long, h: Math.round(long / aspect) } : { w: Math.round(long * aspect), h: long };
+}
+
 /**
- * Otevře celoobrazovkový editor napasování. Vrátí narovnaný JPEG blob nebo null
- * (uživatel zrušil). aspect = len/heightMm určuje poměr stran výstupu.
+ * Otevře celoobrazovkový editor napasování s živým náhledem. Vrátí narovnaný
+ * JPEG blob + pozice rohů, nebo null (uživatel zrušil). aspect = len/heightMm.
+ * initialCorners umožní znovuotevření pro doladění perspektivy.
  */
-export async function mapPhotoToWall(sourceBlob: Blob, aspect: number): Promise<Blob | null> {
+export async function mapPhotoToWall(
+  sourceBlob: Blob,
+  aspect: number,
+  initialCorners?: Pt[],
+): Promise<MapResult | null> {
   const img = await blobToImage(sourceBlob);
   const nW = img.naturalWidth, nH = img.naturalHeight;
 
-  // Zdrojový canvas v plném rozlišení pro vzorkování.
+  // Zdrojový canvas v plném rozlišení pro finální vzorkování.
   const srcCanvas = document.createElement('canvas');
   srcCanvas.width = nW; srcCanvas.height = nH;
   srcCanvas.getContext('2d')!.drawImage(img, 0, 0);
 
-  return new Promise<Blob | null>((resolve) => {
+  // Zmenšený zdroj pro rychlý živý náhled.
+  const pvK = Math.min(1, 500 / Math.max(nW, nH));
+  const pvSrc = document.createElement('canvas');
+  pvSrc.width = Math.max(1, Math.round(nW * pvK));
+  pvSrc.height = Math.max(1, Math.round(nH * pvK));
+  pvSrc.getContext('2d')!.drawImage(img, 0, 0, pvSrc.width, pvSrc.height);
+  const pvOut = outSize(aspect, 240);
+
+  return new Promise<MapResult | null>((resolve) => {
     const ov = document.createElement('div');
     ov.className = 'photomap-overlay';
     ov.innerHTML = `
-      <div class="photomap-hint">Přetáhni 4 body na rohy stěny:
-        <b style="color:#f87171">1 levý horní</b> · <b style="color:#facc15">2 pravý horní</b> ·
-        <b style="color:#4ade80">3 pravý dolní</b> · <b style="color:#60a5fa">4 levý dolní</b></div>
+      <div class="photomap-hint">Přetáhni 4 body na rohy stěny (náhled vpravo se narovnává):
+        <b style="color:#f87171">1 LH</b> · <b style="color:#facc15">2 PH</b> ·
+        <b style="color:#4ade80">3 PD</b> · <b style="color:#60a5fa">4 LD</b></div>
       <div class="photomap-stage">
         <img class="photomap-img" draggable="false"/>
         <svg class="photomap-svg"></svg>
+        <div class="photomap-preview"><span>Náhled</span><canvas></canvas></div>
       </div>
       <div class="photomap-actions">
         <button class="btn" data-act="cancel">✕ Zrušit</button>
@@ -130,22 +155,38 @@ export async function mapPhotoToWall(sourceBlob: Blob, aspect: number): Promise<
 
     const imgEl = ov.querySelector('.photomap-img') as HTMLImageElement;
     const svg = ov.querySelector('.photomap-svg') as SVGSVGElement;
+    const pvCanvas = ov.querySelector('.photomap-preview canvas') as HTMLCanvasElement;
+    pvCanvas.width = pvOut.w; pvCanvas.height = pvOut.h;
     imgEl.src = img.src;
 
     const colors = ['#f87171', '#facc15', '#4ade80', '#60a5fa'];
-    // Handly v NATIVNÍCH px zdroje; init na 12/88 % okrajích.
-    const pts: Pt[] = [
-      { x: nW * 0.12, y: nH * 0.12 },
-      { x: nW * 0.88, y: nH * 0.12 },
-      { x: nW * 0.88, y: nH * 0.88 },
-      { x: nW * 0.12, y: nH * 0.88 },
-    ];
+    const clampPt = (p: Pt): Pt => ({
+      x: Math.min(Math.max(p.x, 0), nW),
+      y: Math.min(Math.max(p.y, 0), nH),
+    });
+    // Handly v NATIVNÍCH px zdroje: buď z předchozího napasování, nebo 12/88 %.
+    const pts: Pt[] = initialCorners && initialCorners.length === 4
+      ? initialCorners.map(clampPt)
+      : [
+          { x: nW * 0.12, y: nH * 0.12 },
+          { x: nW * 0.88, y: nH * 0.12 },
+          { x: nW * 0.88, y: nH * 0.88 },
+          { x: nW * 0.12, y: nH * 0.88 },
+        ];
 
     // Vztah zobrazené <img> ↔ nativní px.
     function scale(): { ox: number; oy: number; k: number } {
       const ir = imgEl.getBoundingClientRect();
       const sr = svg.getBoundingClientRect();
       return { ox: ir.left - sr.left, oy: ir.top - sr.top, k: ir.width / nW };
+    }
+
+    function updatePreview(): void {
+      const sp = pts.map((p) => ({ x: p.x * pvK, y: p.y * pvK }));
+      const out = warp(pvSrc, sp, pvOut.w, pvOut.h);
+      const pctx = pvCanvas.getContext('2d')!;
+      pctx.clearRect(0, 0, pvOut.w, pvOut.h);
+      pctx.drawImage(out, 0, 0);
     }
 
     function draw(): void {
@@ -160,6 +201,8 @@ export async function mapPhotoToWall(sourceBlob: Blob, aspect: number): Promise<
         ).join('');
     }
 
+    function redraw(): void { draw(); updatePreview(); }
+
     let drag: number | null = null;
     svg.addEventListener('pointerdown', (e) => {
       const t = e.target as Element;
@@ -171,19 +214,18 @@ export async function mapPhotoToWall(sourceBlob: Blob, aspect: number): Promise<
     svg.addEventListener('pointermove', (e) => {
       if (drag == null) return;
       const { ox, oy, k } = scale();
-      pts[drag] = {
-        x: Math.min(Math.max((e.clientX - svg.getBoundingClientRect().left - ox) / k, 0), nW),
-        y: Math.min(Math.max((e.clientY - svg.getBoundingClientRect().top - oy) / k, 0), nH),
-      };
-      draw();
+      const r = svg.getBoundingClientRect();
+      pts[drag] = clampPt({ x: (e.clientX - r.left - ox) / k, y: (e.clientY - r.top - oy) / k });
+      redraw();
     });
     svg.addEventListener('pointerup', () => (drag = null));
 
     const ro = new ResizeObserver(draw);
     ro.observe(imgEl);
-    imgEl.complete ? draw() : (imgEl.onload = draw);
+    if (imgEl.complete) redraw();
+    else imgEl.onload = redraw;
 
-    function close(result: Blob | null): void {
+    function close(result: MapResult | null): void {
       ro.disconnect();
       ov.remove();
       resolve(result);
@@ -191,12 +233,10 @@ export async function mapPhotoToWall(sourceBlob: Blob, aspect: number): Promise<
 
     ov.querySelector('[data-act="cancel"]')!.addEventListener('click', () => close(null));
     ov.querySelector('[data-act="ok"]')!.addEventListener('click', () => {
-      // Výstupní rozlišení podle poměru stran stěny, delší strana ≤ 1600.
-      let outW: number, outH: number;
-      if (aspect >= 1) { outW = 1600; outH = Math.round(1600 / aspect); }
-      else { outH = 1600; outW = Math.round(1600 * aspect); }
-      const out = warp(srcCanvas, pts, outW, outH);
-      out.toBlob((b) => close(b), 'image/jpeg', 0.85);
+      const { w, h } = outSize(aspect, 1600);
+      const out = warp(srcCanvas, pts, w, h);
+      const corners = pts.map((p) => ({ ...p }));
+      out.toBlob((b) => close(b ? { blob: b, corners } : null), 'image/jpeg', 0.85);
     });
   });
 }
