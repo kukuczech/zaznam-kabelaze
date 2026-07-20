@@ -112,7 +112,16 @@ export interface Storey {
    * undefined / prázdné = rovný strop ve výšce wallHeightMm.
    */
   slopes?: SlopePlane[];
+  /**
+   * Sběrné podlaží pro FOTOSTĚNY — samostatně vyfocené stěny bez 3D modelu
+   * (rychlý zákres, když není čas na sken). Nemá půdorys ani rohy, ve 3D se
+   * neotvírá; na titulce má vlastní kartu a klik vede rovnou do elevace.
+   */
+  photoWalls?: boolean;
 }
+
+/** ID sběrného podlaží fotostěn — pevné, aby se v projektu nikdy nezaložilo dvakrát. */
+export const PHOTO_STOREY_ID = 'fotosteny';
 
 /** Místnost podlaží: půdorysný polygon (podlaha), ve 3D se z něj kreslí podlaha i strop. */
 export interface Room {
@@ -224,6 +233,13 @@ export interface Wall {
    * ohraničení půdorysu. U běžných stěn undefined.
    */
   planOutline?: XY[];
+  /**
+   * Plocha BEZ MĚŘÍTKA — fotostěna. Rozměry (`axis`, `heightMm`) jsou jen poměr
+   * stran fotky, ne skutečné milimetry. Kóta je proto pouhý POPISEK naměřené
+   * hodnoty: nic neposouvá a nehlásí rozpor s geometrií (viz applyDimValue
+   * v elevation.ts a `conflict` ve wall-svg.ts). Kreslí se jen líc A.
+   */
+  freeScale?: boolean;
   /** Dva nezávislé líce stěny — obsah (trasy, kóty, prvky, podklady) je pro každý zvlášť. */
   faces: Record<WallSide, WallFace>;
 }
@@ -665,6 +681,44 @@ export function roomSurfaces(room: Room): Wall[] {
   if (room.ceiling) out.push(room.ceiling);
   for (const sc of room.slopeCeilings ?? []) if (sc.surface) out.push(sc.surface);
   return out;
+}
+
+/**
+ * Nominální šířka fotostěny (mm). Fotka měřítko nemá, ale rozměry musí být řádově
+ * „jako stěna" — kótovací čáry, šipky i písmo mají v SVG absolutní velikost v mm,
+ * takže na ploše 4 m široké vycházejí čitelně stejně jako u skutečné stěny.
+ */
+export const PHOTO_WALL_WIDTH_MM = 4000;
+
+/**
+ * Kreslicí plocha z fotografie („fotostěna") — obdélník s poměrem stran fotky.
+ * Jen líc A, bez tloušťky a bez měřítka (freeScale). Editor stěny, exporty i ZIP
+ * s ní pak pracují úplně stejně jako se skutečnou stěnou.
+ */
+export function photoWallSurface(name: string, aspect: number): Wall {
+  const w = PHOTO_WALL_WIDTH_MM;
+  const h = Math.max(1, Math.round(w / (aspect > 0 ? aspect : 1)));
+  return {
+    id: newId(),
+    ifcGuid: '',
+    name,
+    axis: [{ x: 0, y: 0 }, { x: w, y: 0 }],
+    thicknessMm: 0,
+    heightMm: h,
+    openings: [],
+    freeScale: true,
+    faces: { A: emptyFace(), B: emptyFace() },
+  };
+}
+
+/** Sběrné podlaží fotostěn; `create` = založit, když ještě není. */
+export function photoStorey(project: Project, create = false): Storey | undefined {
+  let s = project.storeys.find((x) => x.photoWalls);
+  if (!s && create) {
+    s = { id: PHOTO_STOREY_ID, name: 'Fotostěny', wallHeightMm: 2700, walls: [], photoWalls: true };
+    project.storeys.push(s);
+  }
+  return s;
 }
 
 export function emptyProject(): Project {

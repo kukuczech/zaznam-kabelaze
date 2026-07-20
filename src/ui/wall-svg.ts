@@ -630,13 +630,16 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
     }
   }
 
-  // Mřížka po 500 mm (v holém overlay pro 3D vynecháno)
+  // Mřížka po 500 mm (v holém overlay pro 3D vynecháno; u fotostěny by předstírala
+  // měřítko, které fotka nemá — tam jen překáží přes fotku)
   if (!opts.bare) {
-    const grid: string[] = [];
-    const gridColor = print ? '#ddd' : '#1f2937';
-    for (let u = 500; u < len; u += 500) grid.push(`M ${u} 0 V ${H}`);
-    for (let v = 500; v < H; v += 500) grid.push(`M 0 ${H - v} H ${len}`);
-    parts.push(`<path d="${grid.join(' ')}" stroke="${gridColor}" stroke-width="4" fill="none"/>`);
+    if (!wall.freeScale) {
+      const grid: string[] = [];
+      const gridColor = print ? '#ddd' : '#1f2937';
+      for (let u = 500; u < len; u += 500) grid.push(`M ${u} 0 V ${H}`);
+      for (let v = 500; v < H; v += 500) grid.push(`M 0 ${H - v} H ${len}`);
+      parts.push(`<path d="${grid.join(' ')}" stroke="${gridColor}" stroke-width="4" fill="none"/>`);
+    }
 
     // Obrys stěny — u šikminy sleduje lomenou horní hranu místo obdélníku.
     if (topPts) {
@@ -786,7 +789,8 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
     // Kóta má přednost, ale geometrie ji nedokázala splnit (drží ji naměřené segmenty)
     // → naměřená hodnota nesedí se skutečností. Ukázat červeně a s „≠ skutečnost",
     // ať je jasné, že kóta NEPLATÍ (a o kolik se míjí).
-    const conflict = dim.valueMm != null && Math.abs(dim.valueMm - geom) > 1;
+    // Fotostěna měřítko nemá — zapsaná míra je popisek, s geometrií se neporovnává.
+    const conflict = !wall.freeScale && dim.valueMm != null && Math.abs(dim.valueMm - geom) > 1;
     const sel = !print && dim.id === opts.selectedDimId;
     const dc = conflict ? (print ? '#cc0000' : '#f87171') : sel ? '#38bdf8' : dimColor;
     const label = conflict ? `${dim.valueMm} ≠ ${geom}` : `${dim.valueMm ?? geom}${dim.valueMm == null ? '?' : ''}`;
@@ -825,7 +829,7 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
   // jinak jen kompaktní popisek. V holém overlay (3D) vynecháno.
   if (opts.refDims) {
     parts.push(refDimsSvg(len, H, print));
-  } else if (!opts.bare) {
+  } else if (!opts.bare && !wall.freeScale) { // fotostěna měřítko nemá — rozměr neuvádět
     parts.push(
       `<text x="${len / 2}" y="${H + 250}" text-anchor="middle" font-size="160" fill="${print ? '#333' : '#64748b'}">${esc(`${Math.round(len)} × ${Math.round(H)} mm`)}</text>`,
     );

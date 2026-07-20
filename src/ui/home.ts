@@ -1,7 +1,9 @@
-// Domovská obrazovka: podlaží, import IFC, kategorie, exporty.
-import { project, saveProject } from '../db';
+// Domovská obrazovka: podlaží, fotostěny, import IFC, kategorie, exporty.
+import { getPhoto, project, saveProject } from '../db';
 import { isCategoryVisible, newId } from '../model/types';
+import { createPhotoWall, deletePhotoWall, nextPhotoWallName, photoWalls } from '../model/photo-wall';
 import { importIfc } from '../model/ifc-import';
+import { registerCleanup } from '../main';
 import type { PdfOptions } from '../pdf';
 
 export async function renderHome(root: HTMLElement): Promise<void> {
@@ -23,6 +25,23 @@ export async function renderHome(root: HTMLElement): Promise<void> {
           <label class="btn">
             🧱 Importovat mesh (OBJ/PLY)
             <input type="file" accept=".obj,.ply" hidden id="mesh-file" />
+          </label>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Fotostěny</h2>
+        <div class="muted" style="margin-bottom:8px">
+          Rychlý zákres do fotky — bez 3D modelu. Kóty jsou popisky naměřených hodnot.
+        </div>
+        <div id="photo-walls"></div>
+        <div class="row" style="align-self:flex-start">
+          <label class="btn">
+            📷 Vyfotit stěnu
+            <input type="file" accept="image/*" capture="environment" hidden id="photo-shot" />
+          </label>
+          <label class="btn">
+            🖼️ Nahrát z galerie
+            <input type="file" accept="image/*" hidden id="photo-pick" />
           </label>
         </div>
       </div>
@@ -51,10 +70,12 @@ export async function renderHome(root: HTMLElement): Promise<void> {
     </main>`;
 
   const storeysEl = root.querySelector('#storeys')!;
-  if (project.storeys.length === 0) {
+  // Sběrné podlaží fotostěn má vlastní kartu — mezi stavební podlaží nepatří.
+  const buildingStoreys = project.storeys.filter((s) => !s.photoWalls);
+  if (buildingStoreys.length === 0) {
     storeysEl.innerHTML = `<div class="muted">Zatím žádné podlaží — importujte IFC soubor z magicplan.</div>`;
   }
-  for (const s of project.storeys) {
+  for (const s of buildingStoreys) {
     const routeCount = s.walls.reduce((n, w) => n + w.faces.A.routes.length + w.faces.B.routes.length, 0);
     const el = document.createElement('div');
     el.className = 'list-item';
@@ -74,6 +95,8 @@ export async function renderHome(root: HTMLElement): Promise<void> {
     });
     storeysEl.appendChild(el);
   }
+
+  await renderPhotoWalls(root);
 
   const catsEl = root.querySelector('#cats')!;
   project.categories.forEach((c, i) => {
@@ -248,6 +271,88 @@ export async function renderHome(root: HTMLElement): Promise<void> {
     await importZip(file);
     renderHome(root);
   });
+}
+
+/**
+ * Seznam fotostěn v kartě „Fotostěny" + obsluha focení / nahrání z galerie.
+ * Klik na položku otevře rovnou elevaci (líc A) — fotostěna 3D pohled nemá.
+ */
+async function renderPhotoWalls(root: HTMLElement): Promise<void> {
+  const listEl = root.querySelector('#photo-walls')!;
+  const walls = photoWalls();
+  if (walls.length === 0) {
+    listEl.innerHTML = `<div class="muted">Zatím žádná — vyfoť stěnu, zakresli do ní trasy a okótuj.</div>`;
+  }
+  // Náhledy fotek: objectURL uvolníme při odchodu z obrazovky.
+  const urls: string[] = [];
+  registerCleanup(() => urls.splice(0).forEach((u) => URL.revokeObjectURL(u)));
+
+  for (const w of walls) {
+    const face = w.faces.A;
+    const el = document.createElement('div');
+    el.className = 'list-item';
+    el.innerHTML = `
+      <div class="thumb" style="width:44px;height:44px;border-radius:6px;background:#1e293b;flex:none"></div>
+      <div class="grow">
+        <div>${w.name}</div>
+        <div class="sub">${face.routes.length} tras · ${face.dims.length} kót · ${face.fixtures.length} prvků</div>
+      </div>
+      <button data-rename title="Přejmenovat">✏️</button>
+      <button class="danger" data-del>✕</button>`;
+    el.addEventListener('click', () => (location.hash = `#/wall/${w.id}/A`));
+    el.querySelector('[data-rename]')!.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const name = prompt('Název fotostěny:', w.name)?.trim();
+      if (!name) return;
+      w.name = name;
+      saveProject();
+      renderHome(root);
+    });
+    el.querySelector('[data-del]')!.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Smazat fotostěnu „${w.name}" včetně fotky a zákresu?`)) return;
+      await deletePhotoWall(w.id);
+      renderHome(root);
+    });
+    listEl.appendChild(el);
+
+    // Miniatura z podkladu líce (nebo z originálu, kdyby podklad chyběl).
+    const photoId = face.backgrounds[0]?.photoId ?? face.photoIds[0];
+    if (photoId) {
+      getPhoto(photoId).then((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        urls.push(url);
+        const thumb = el.querySelector('.thumb') as HTMLElement;
+        thumb.style.backgroundImage = `url(${url})`;
+        thumb.style.backgroundSize = 'cover';
+        thumb.style.backgroundPosition = 'center';
+      });
+    }
+  }
+
+  // Vyfotit / nahrát: obojí končí stejným založením fotostěny a otevřením elevace.
+  const addPhoto = async (inputId: string) => {
+    const input = root.querySelector<HTMLInputElement>(inputId)!;
+    const file = input.files?.[0];
+    if (!file) return;
+    const label = input.parentElement as HTMLElement;
+    const orig = label.textContent;
+    label.textContent = '⏳ Zakládám…';
+    try {
+      const name = prompt('Název fotostěny:', nextPhotoWallName())?.trim() || nextPhotoWallName();
+      const wall = await createPhotoWall(file, name);
+      location.hash = `#/wall/${wall.id}/A`; // rovnou do editoru — ať se dá hned kreslit
+    } catch (err) {
+      alert(`Založení fotostěny selhalo: ${err}`);
+      console.error(err);
+      label.textContent = orig;
+    } finally {
+      input.value = ''; // ať jde tutéž fotku vybrat znovu
+    }
+  };
+  root.querySelector('#photo-shot')!.addEventListener('change', () => addPhoto('#photo-shot'));
+  root.querySelector('#photo-pick')!.addEventListener('change', () => addPhoto('#photo-pick'));
 }
 
 /**

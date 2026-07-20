@@ -65,7 +65,7 @@ export async function renderPrint(root: HTMLElement): Promise<void> {
         }
         parts.push(`
           <div class="print-wall">
-            <h3 style="margin-bottom:4px">${esc(storey.name)} — ${esc(wall.name)} · strana ${side}</h3>
+            <h3 style="margin-bottom:4px">${esc(storey.name)} — ${esc(wall.name)}${wall.freeScale ? '' : ` · strana ${side}`}</h3>
             ${wallNote}
             <div style="margin-bottom:6px">${legend}</div>
             ${fixtureLegend}

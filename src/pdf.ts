@@ -90,7 +90,10 @@ function drawWall(doc: jsPDF, el: WallElevation, opts: PdfOptions, backgrounds: 
   // Titulek stěny (+ poznámka stěny šedě za ním)
   doc.setTextColor(20, 20, 20);
   doc.setFontSize(13);
-  const title = `${el.storeyName} — ${el.wall.name} · strana ${el.side}`;
+  // Fotostěna má jediný líc a nemá měřítko — označení strany by jen mátlo.
+  const title = el.wall.freeScale
+    ? `${el.storeyName} — ${el.wall.name}`
+    : `${el.storeyName} — ${el.wall.name} · strana ${el.side}`;
   doc.text(title, DA.x, 12);
   if (el.wallNote) {
     const tw = doc.getTextWidth(title);
@@ -279,10 +282,13 @@ function drawBlock(doc: jsPDF, el: WallElevation, denom: number): void {
   doc.line(bx + bw * 0.62, by + bh / 2, bx + bw * 0.62, by + bh);
   doc.setTextColor(20, 20, 20);
   doc.setFontSize(9); doc.text(project.name, bx + 3, by + 7);
-  doc.setFontSize(8); doc.text(`${el.storeyName} — ${el.wall.name} (${el.side})`, bx + 3, by + bh - 6.5);
+  doc.setFontSize(8);
+  doc.text(el.wall.freeScale ? `${el.storeyName} — ${el.wall.name}` : `${el.storeyName} — ${el.wall.name} (${el.side})`, bx + 3, by + bh - 6.5);
   doc.setFontSize(7);
   doc.text(new Date().toISOString().slice(0, 10), bx + bw * 0.65, by + bh - 6.5);
-  doc.setFontSize(10); doc.text(`M 1:${denom}`, bx + bw * 0.65, by + 7);
+  // Fotostěna je jen fotka bez měřítka — uvádět „M 1:x" by bylo zavádějící.
+  doc.setFontSize(10);
+  doc.text(el.wall.freeScale ? 'bez měřítka' : `M 1:${denom}`, bx + bw * 0.65, by + 7);
 }
 
 /** Souhrnná stránka místností: název + poznámka, seskupeno po podlažích. */

@@ -27,6 +27,9 @@ export function migrateProject(p: Project): Project {
     p.photoPhases = structuredClone(DEFAULT_PHOTO_PHASES);
   }
   for (const s of p.storeys ?? []) {
+    // Fotostěny nejsou půdorys: nemají rohy, sousedy ani místnosti. Stavební
+    // geometrii (graf rohů, ořez líců) na ně pouštět nesmíme — přepsala by jim osu.
+    if (s.photoWalls) continue;
     // Dřív se ukládaly jen holé polygony podlah `slabs`; teď jsou to místnosti.
     const legacySlabs = (s as { slabs?: XY[][] }).slabs;
     if (!Array.isArray(s.rooms)) s.rooms = [];

@@ -1,5 +1,5 @@
 // Bootstrap + jednoduchý hash router: #/ | #/storey/:id | #/wall/:id/:strana | #/print
-import { loadProject, undo, redo } from './db';
+import { loadProject, project, undo, redo } from './db';
 import { renderHome } from './ui/home';
 import { renderViewer3d } from './ui/viewer3d';
 import { renderElevation } from './ui/elevation';
@@ -22,6 +22,11 @@ export async function route(): Promise<void> {
   const hash = location.hash || '#/';
   const [, screen, id, arg] = hash.split('/');
   app.innerHTML = '';
+  // Sběrné podlaží fotostěn nemá půdorys ani 3D — otevírají se rovnou jednotlivé elevace.
+  if (screen === 'storey' && id && project.storeys.find((s) => s.id === id)?.photoWalls) {
+    location.hash = '#/';
+    return;
+  }
   if (screen === 'storey' && id) await renderViewer3d(app, id);
   else if (screen === 'wall' && id) await renderElevation(app, id, (arg as WallSide) || 'A');
   else if (screen === 'print') await renderPrint(app);

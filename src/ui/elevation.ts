@@ -31,6 +31,8 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   const W = wall;
   const F = W.faces[side]; // obsah tohoto líce (trasy, kóty, prvky, podklady); otvory jsou sdílené na W
   const isPlan = !!W.planOutline; // podlaha/strop místnosti (půdorysná plocha), ne svislá stěna
+  const isPhoto = !!W.freeScale;  // fotostěna: plocha bez měřítka, kreslí se jen líc A
+  const oneFace = isPlan || isPhoto; // plochy s jediným lícem — přepínač strany nemá smysl
   // Viditelný líc stěny: kreslíme a ořezáváme na [U0, U1] v ose (u od axis[0]);
   // zobrazovací šířka je FL. Uložené souřadnice zůstávají v ose stěny.
   const FL = faceLenMm(W, side); // délka viditelného líce (zobrazovací šířka)
@@ -62,8 +64,8 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   root.innerHTML = `
     <header class="bar">
       <button id="back">←</button>
-      <h1>${W.name} <span class="muted" style="font-size:13px">(${isPlan ? 'půdorys' : `strana ${side}`})</span></h1>
-      ${isPlan ? '' : `<button id="flip-side" title="Přepnout na druhý líc stěny">⇄ strana ${side === 'A' ? 'B' : 'A'}</button>`}
+      <h1>${W.name} <span class="muted" style="font-size:13px">(${isPlan ? 'půdorys' : isPhoto ? 'fotostěna' : `strana ${side}`})</span></h1>
+      ${oneFace ? '' : `<button id="flip-side" title="Přepnout na druhý líc stěny">⇄ strana ${side === 'A' ? 'B' : 'A'}</button>`}
       <button id="undo" title="Zpět (Ctrl+Z)">↶</button>
       <button id="redo" title="Vpřed (Ctrl+Shift+Z)">↷</button>
       <button id="disto"><span id="disto-dot" class="dot" style="background:#64748b"></span> Metr</button>
@@ -91,7 +93,9 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       <button id="fixorder">⚙️ Prvky</button>
     </div>`;
 
-  root.querySelector('#back')!.addEventListener('click', () => (location.hash = `#/storey/${storeyId}`));
+  // Fotostěna 3D pohled nemá — zpět se vrací na titulku, odkud se zakládá.
+  root.querySelector('#back')!.addEventListener('click', () =>
+    (location.hash = isPhoto ? '#/' : `#/storey/${storeyId}`));
   // Přepnout na druhý líc téže stěny (šlice/kóty/prvky má každá strana vlastní).
   root.querySelector('#flip-side')?.addEventListener('click', () => {
     commitDraft(); // rozkreslený šlic uzavřít, ať se neztratí
@@ -386,7 +390,9 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       selectedDimId,
       selectedFixtureId,
       selectedAreaId,
-      refDims: true, // kontrolní kóta rozměru (světlá míra) pro porovnání s naměřeným
+      // Kontrolní kóta rozměru (světlá míra) pro porovnání s naměřeným. Fotostěna
+      // měřítko nemá, tam by ukazovala nesmyslné číslo → vynechat.
+      refDims: !isPhoto,
       // Šikmý strop (podkroví): líc se ukončí skloněnou hranou a obsah nad ni se ořízne.
       ceilingTop: storey ? faceCeilingPolyline(storey, W, side) ?? undefined : undefined,
     });
@@ -521,7 +527,9 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     dim.valueMm = Math.round(mm);
     const ra = movAnchor(dim);        // posouvaná entita (trasa nebo prvek)
     const ed = dimEdge(dim);          // hrana, od které se měří
-    if (ra && ed) {
+    // Fotostěna nemá měřítko: kóta je jen zapsaná naměřená hodnota (vztažená
+    // k rohu / hraně fotky). Geometrií nehýbeme — zákres by se rozjel.
+    if (ra && ed && !isPhoto) {
       const axis = edgeAxis(ed.edge);
       const p = resolveAnchor(W, side, ra); // aktuální poloha kótované entity
       if (p) {
