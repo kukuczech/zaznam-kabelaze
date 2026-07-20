@@ -332,6 +332,12 @@ async function renderPhotoWalls(root: HTMLElement): Promise<void> {
   }
 
   // Vyfotit / nahrát: obojí končí stejným založením fotostěny a otevřením elevace.
+  //
+  // POZOR: tady se NESMÍ volat prompt()/confirm()/alert(). Běžíme v `change` handleru
+  // souborového vstupu, tedy ve chvíli, kdy se picker fotek teprve zavírá. V nativním
+  // shellu (WKWebView) jde JS dialog přes UIAlertController, který se v tu chvíli nemá
+  // kam vykreslit — a appka na tom spadne. Fotostěna proto dostane automatický název
+  // a přejmenovat se dá až potom tlačítkem ✏️ v seznamu.
   const addPhoto = async (inputId: string) => {
     const input = root.querySelector<HTMLInputElement>(inputId)!;
     const file = input.files?.[0];
@@ -340,13 +346,13 @@ async function renderPhotoWalls(root: HTMLElement): Promise<void> {
     const orig = label.textContent;
     label.textContent = '⏳ Zakládám…';
     try {
-      const name = prompt('Název fotostěny:', nextPhotoWallName())?.trim() || nextPhotoWallName();
-      const wall = await createPhotoWall(file, name);
+      const wall = await createPhotoWall(file, nextPhotoWallName());
       location.hash = `#/wall/${wall.id}/A`; // rovnou do editoru — ať se dá hned kreslit
     } catch (err) {
-      alert(`Založení fotostěny selhalo: ${err}`);
+      // Chybu ukážeme v kartě, ne přes alert() — viz poznámka výše.
       console.error(err);
       label.textContent = orig;
+      listEl.innerHTML = `<div class="muted" style="color:#f87171">Fotku se nepodařilo načíst: ${err}</div>`;
     } finally {
       input.value = ''; // ať jde tutéž fotku vybrat znovu
     }
