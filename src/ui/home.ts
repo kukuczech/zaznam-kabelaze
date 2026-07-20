@@ -210,9 +210,9 @@ export async function renderHome(root: HTMLElement): Promise<void> {
       // Rovnou otevřít 3D model — ať je jasné, že se import povedl.
       location.hash = `#/storey/${storey.id}`;
     } catch (err) {
-      alert(`Import IFC selhal: ${err}`);
       console.error(err);
       label.textContent = origText;
+      showImportError(root, `Import IFC selhal: ${err}`);
     }
   });
 
@@ -230,9 +230,9 @@ export async function renderHome(root: HTMLElement): Promise<void> {
       saveProject();
       location.hash = `#/storey/${storey.id}`; // rovnou otevřít 3D — ať je vidět, že import prošel
     } catch (err) {
-      alert(`Import selhal: ${err}`);
       console.error(err);
       label.textContent = origText;
+      showImportError(root, `Import selhal: ${err}`);
     }
   };
 
@@ -266,7 +266,10 @@ export async function renderHome(root: HTMLElement): Promise<void> {
   root.querySelector<HTMLInputElement>('#zip-file')!.addEventListener('change', async (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
-    if (!confirm('Import přepíše aktuální projekt. Pokračovat?')) return;
+    // Ptáme se hned po zavření pickeru → dialog musí být ve stránce, ne nativní.
+    const go = await confirmDialog('Import přepíše aktuální projekt. Pokračovat?', '📂 Importovat');
+    (e.target as HTMLInputElement).value = ''; // ať jde tentýž soubor vybrat znovu
+    if (!go) return;
     const { importZip } = await import('../zip');
     await importZip(file);
     renderHome(root);
@@ -366,6 +369,50 @@ async function renderPhotoWalls(root: HTMLElement): Promise<void> {
  * Textury / overlay / prázdné stěny / souhrn místností jsou přepínatelné,
  * fáze fotek se vybírá ze seznamu (výchozí = aktivní fáze projektu).
  */
+/**
+ * Chyba importu vypsaná do karty Podlaží. Zase kvůli tomu, že se sem doklopýtáme
+ * hned po zavření pickeru, kdy nativní `alert()` nemusí projít — a hláška by se
+ * ztratila beze stopy.
+ */
+function showImportError(root: HTMLElement, message: string): void {
+  const el = root.querySelector('#storeys');
+  if (!el) return;
+  const line = document.createElement('div');
+  line.className = 'muted';
+  line.style.color = '#f87171';
+  line.textContent = message;
+  el.appendChild(line);
+}
+
+/**
+ * Potvrzení vykreslené ve stránce — náhrada za nativní `confirm()` tam, kde se ptáme
+ * hned po zavření souborového pickeru. Nativní JS dialog jde v iOS shellu přes
+ * UIAlertController, který se v tu chvíli nemá kam vykreslit; dřív na tom appka padala
+ * (viz komentář u addPhoto), dnes ho nativní pojistka zruší — a import by se tiše
+ * neprovedl. Tenhle dialog je jen HTML, takže funguje vždy a všude stejně.
+ */
+function confirmDialog(message: string, okLabel = 'Pokračovat'): Promise<boolean> {
+  return new Promise((resolve) => {
+    const ov = document.createElement('div');
+    ov.className = 'modal-overlay';
+    ov.innerHTML = `
+      <div class="modal-card card" role="dialog" aria-modal="true">
+        <div style="margin-bottom:4px">${message}</div>
+        <div class="row" style="justify-content:flex-end;margin-top:6px">
+          <button id="cd-cancel">Zrušit</button>
+          <button class="primary" id="cd-ok">${okLabel}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(ov);
+    const close = (result: boolean) => { ov.remove(); document.removeEventListener('keydown', onKey); resolve(result); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(false); };
+    document.addEventListener('keydown', onKey);
+    ov.addEventListener('click', (e) => { if (e.target === ov) close(false); });
+    ov.querySelector('#cd-cancel')!.addEventListener('click', () => close(false));
+    ov.querySelector('#cd-ok')!.addEventListener('click', () => close(true));
+  });
+}
+
 function openPdfDialog(): Promise<PdfOptions | null> {
   return new Promise((resolve) => {
     const phases = project.photoPhases ?? [];
