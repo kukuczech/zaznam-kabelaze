@@ -10,6 +10,36 @@ import { buildCostField, snapPathPx, simplifyPath, type CostField } from './chas
 
 type Mode = 'select' | 'draw' | 'area' | 'dim' | 'place' | 'photo';
 
+/**
+ * Rozkreslený šlic, ve kterém se má po překreslení obrazovky pokračovat.
+ * Undo/redo překreslí celou elevaci (route()), takže by se rozkreslený šlic ztratil
+ * a uživatel by po kroku zpět vypadl z kreslení. Tímhle si ho obrazovka předá sama
+ * sobě; přežít musí jen jedno překreslení, proto se hodnota při vyzvednutí maže.
+ */
+let resumeDraw: { wallId: string; side: WallSide; routeId: string } | null = null;
+
+/** Vyzvedne (a zahodí) pokyn k pokračování v kreslení, patří-li této ploše a líci. */
+function takeResumeDraw(wallId: string, side: WallSide): string | null {
+  const r = resumeDraw;
+  resumeDraw = null;
+  return r && r.wallId === wallId && r.side === side ? r.routeId : null;
+}
+
+/**
+ * Pohled (přiblížení a střed) přenesený přes překreslení po undo/redo — jinak by každý
+ * krok zpět skočil na „vejít se" a při kroku po jednotlivých bodech by se s tím nedalo
+ * pracovat. Nese se PŘIBLÍŽENÍ A STŘED, ne hotový viewBox: ten je vztažený k boxu
+ * srovnanému na poměr stran plochy, který se počítá až z rozměrů vykresleného SVG.
+ * Platí jen pro tutéž plochu a líc a jen na jedno překreslení.
+ */
+let resumeView: { wallId: string; side: WallSide; zoom: number; cx: number; cy: number } | null = null;
+
+function takeResumeView(wallId: string, side: WallSide): { zoom: number; cx: number; cy: number } | null {
+  const v = resumeView;
+  resumeView = null;
+  return v && v.wallId === wallId && v.side === side ? v : null;
+}
+
 /** Nejmenší rozumný rozměr výdřevy (mm) — pod ním se ťuknutí bere jako omyl. */
 const MIN_AREA_MM = 50;
 
@@ -108,8 +138,14 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   const syncHistoryBtns = () => { undoBtn.disabled = !canUndo(); redoBtn.disabled = !canRedo(); };
   syncHistoryBtns();
   registerCleanup(onHistoryChange(syncHistoryBtns));
-  undoBtn.addEventListener('click', async () => { if (await undo()) await route(); });
-  redoBtn.addEventListener('click', async () => { if (await redo()) await route(); });
+  // Kreslíme-li zrovna šlic, ať v něm krok zpět/vpřed pokračuje — jen o bod jinde.
+  // Zároveň si přeneseme výřez, ať krok zpět neskočí na „vejít se".
+  const markResume = (): void => {
+    if (mode === 'draw' && draft) resumeDraw = { wallId: W.id, side, routeId: draft.id };
+    resumeView = { wallId: W.id, side, zoom: zoomNow(), cx: vb.x + vb.w / 2, cy: vb.y + vb.h / 2 };
+  };
+  undoBtn.addEventListener('click', async () => { markResume(); if (await undo()) await route(); });
+  redoBtn.addEventListener('click', async () => { markResume(); if (await redo()) await route(); });
 
   // --- DISTO ---
   const distoDot = root.querySelector('#disto-dot') as HTMLElement;
@@ -3076,6 +3112,10 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       }
       ensureDraftLive(); // od prvního bodu je šlic v F.routes → jde na něj hned kótovat
       pendingDimId = null; // rozepsaná kóta patřila předchozí úsečce
+      // Každé ťuknutí = jeden krok historie, aby undo ubralo poslední bod, ne celý
+      // šlic. (Trasování po šlicu 🧲 přidá naráz víc bodů — to je pořád jedno gesto,
+      // takže i jeden krok.)
+      saveProject();
       redraw();
       showDrawPanel();
     } else if (mode === 'place') {
@@ -3181,6 +3221,29 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   }, { passive: false });
 
   await loadBackground();
-  setMode('select');
+  // Obnovit přiblížení a střed z doby před undo/redo (až teď — SVG má rozměry, takže
+  // „vejít se" box jde srovnat na poměr stran plochy).
+  const rv = takeResumeView(W.id, side);
+  if (rv) {
+    fitVb = computeFitVb();
+    const w = fitVb.w / rv.zoom, h = fitVb.h / rv.zoom;
+    vb = { w, h, x: rv.cx - w / 2, y: rv.cy - h / 2 };
+    setViewBox();
+  }
+  // Po undo/redo se vrátit rovnou do kreslení rozdělaného šlicu (viz resumeDraw).
+  // Když krok zpět smazal i jeho první bod, trasa v modelu není → začne se nová.
+  const resumeId = takeResumeDraw(W.id, side);
+  const resumed = resumeId ? F.routes.find((r) => r.id === resumeId) : undefined;
+  if (resumed) {
+    setMode('draw');
+    draft = resumed;
+    selectedRouteId = resumed.id;
+    redraw();
+    showDrawPanel();
+  } else if (resumeId) {
+    setMode('draw');
+  } else {
+    setMode('select');
+  }
   syncZoom();
 }
