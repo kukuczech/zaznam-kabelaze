@@ -67,6 +67,16 @@ main.page { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direct
 .muted { color: var(--muted); }
 .dot { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
 
+/* Modální dialog (např. volby PDF exportu) */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 300;
+  background: #030712cc; backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.modal-card { width: min(420px, 100%); max-height: 90vh; overflow: auto; }
+.modal-card .opt { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
+.modal-card .opt input { width: 18px; height: 18px; }
+
 canvas.viewer { display: block; width: 100%; height: 100%; touch-action: none; }
 .viewer-wrap { flex: 1; position: relative; overflow: hidden; }
 .viewer-overlay {
@@ -76,6 +86,48 @@ canvas.viewer { display: block; width: 100%; height: 100%; touch-action: none; }
   pointer-events: none;
 }
 .viewer-overlay > * { pointer-events: auto; }
+
+.viewer-topbar { z-index: 3; }
+.viewer-topbar button.active { background: var(--accent); color: #082f49; }
+
+/* Panel výběru (stěna / místnost) ve 3D */
+.sel-panel {
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(420px, 100%);
+  background: var(--panel); border-radius: 12px; padding: 12px;
+  box-shadow: 0 6px 24px #0008;
+}
+.sel-panel .sel-title { font-size: 13px; }
+.sel-panel .sel-name { font-weight: 600; }
+.sel-panel .sel-note { min-height: 44px; resize: vertical; }
+/* Pole naměřené délky stěny (DISTO) */
+.sel-panel .sel-measure {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: var(--muted);
+}
+.sel-panel .sel-measure input { font-weight: 600; }
+/* Stav stěny: odhad (LiDAR) vs. potvrzeno (naměřeno) */
+.wall-state { font-size: 11px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
+.wall-state.estimate { background: #78716c55; color: #d6d3d1; }
+.wall-state.confirmed { background: #16a34a33; color: #4ade80; }
+
+/* Panel úhlopříček (fáze 2) */
+.sel-panel .diag-hint { font-size: 12px; color: var(--muted); }
+.sel-panel .diag-empty { font-size: 12px; }
+.sel-panel .diag-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 13px; padding: 4px 8px; background: #0003; border-radius: 8px;
+}
+.sel-panel .diag-del { padding: 2px 8px; }
+.sel-panel .diag-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* Ukazatel pokrytí přeměření v topbaru 3D */
+.measure-badge {
+  font-size: 12px; padding: 4px 8px; border-radius: 8px;
+  background: #0f172acc; border: 1px solid #334155; color: var(--muted);
+  white-space: nowrap;
+}
+.measure-badge.all-measured { border-color: #16a34a; color: #4ade80; }
 
 .toolbar {
   display: flex; gap: 6px; align-items: center;
@@ -87,6 +139,8 @@ canvas.viewer { display: block; width: 100%; height: 100%; touch-action: none; }
 .toolbar button.active { background: var(--accent); color: #082f49; }
 
 svg.elevation { display: block; width: 100%; height: 100%; touch-action: none; background: #111827; }
+/* Textura líce (<image>) nesmí jít nativně táhnout — jinak drag&drop obrázku zabije tažení bodů. */
+svg.elevation image { -webkit-user-drag: none; user-select: none; }
 
 /* Lupa (zoom) — plovoucí ovládání v ploše editoru */
 .zoom-ctl {
@@ -134,6 +188,10 @@ input.disto-target {
 .photomap-preview canvas {
   display: block; max-width: 30vw; max-height: 30vh;
   border-radius: 4px; background: #030712;
+}
+.photomap-plan {
+  width: 120px; height: 96px; margin-top: 2px;
+  background: #030712; border-radius: 4px;
 }
 .photomap-actions { display: flex; gap: 10px; justify-content: center; }
 

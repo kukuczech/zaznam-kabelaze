@@ -18,6 +18,30 @@ let device: BluetoothDevice | null = null;
 let status: DistoStatus = 'disconnected';
 const statusListeners = new Set<(s: DistoStatus) => void>();
 
+// --- Nativní most (iOS WKWebView) ---------------------------------------
+// Když appka běží UVNITŘ sesterské iOS aplikace (LiDAR skener), Bluetooth
+// obsluhuje nativní vrstva (CoreBluetooth) – WKWebView Web Bluetooth neumí.
+// Naměřené hodnoty i stav připojení pak proudí sem oknem (viz __lidarDisto);
+// logika „aktivního cíle" (které pole měření přijme) zůstává beze změny.
+interface NativeBridge { postMessage(msg: unknown): void; }
+function distoNativeBridge(): NativeBridge | null {
+  return (window as unknown as { webkit?: { messageHandlers?: { distoBridge?: NativeBridge } } })
+    .webkit?.messageHandlers?.distoBridge ?? null;
+}
+
+/** True, běží-li web uvnitř nativního shellu, který obsluhuje metr za nás. */
+export function isNativeDisto(): boolean {
+  return distoNativeBridge() !== null;
+}
+
+// Rozhraní, které volá nativní vrstva přes evaluateJavaScript:
+//   window.__lidarDisto.measurement(mm)  – jedno pípnutí metru (mm)
+//   window.__lidarDisto.status('connected' | 'connecting' | 'disconnected')
+(window as unknown as { __lidarDisto?: unknown }).__lidarDisto = {
+  measurement(mm: number): void { applyMm(Math.round(mm)); },
+  status(s: DistoStatus): void { setStatus(s); },
+};
+
 interface Target {
   input: HTMLInputElement;
   apply: (mm: number) => void;
@@ -38,6 +62,26 @@ function setStatus(s: DistoStatus): void {
   status = s;
   statusListeners.forEach((fn) => fn(s));
 }
+
+// Alternativa k metru: když je nějaké pole zvýrazněné jako cíl (modře) a
+// uživatel začne psát číslici na klávesnici (aniž by měl kurzor v jiném poli),
+// přesměrujeme psaní rovnou do zvýrazněného pole. První číslici vložíme ručně
+// a nahradíme jí předvyplněnou hodnotu (spoléhat na to, že ji prohlížeč vloží
+// sám po focusu, je nespolehlivé — po tapnutí do stěny je focus mimo pole).
+// Další číslice pak už píše prohlížeč nativně a Enter potvrdí (handler na poli).
+window.addEventListener('keydown', (e) => {
+  if (!target) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!/^[0-9]$/.test(e.key)) return;
+  const active = document.activeElement as HTMLElement | null;
+  if (active === target.input) return; // už se píše přímo do pole → nechá prohlížeč
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+  e.preventDefault();
+  const input = target.input;
+  input.value = e.key; // první číslice nahradí původní hodnotu
+  input.focus();
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+});
 
 /** Označí pole jako příjemce příštího měření (a zvýrazní ho). */
 export function setDistoTarget(input: HTMLInputElement, apply: (mm: number) => void): void {
@@ -101,6 +145,9 @@ async function subscribe(): Promise<void> {
 }
 
 export async function connectDisto(): Promise<void> {
+  // V nativním shellu si připojení řídí iOS vrstva – jen jí to řekneme.
+  const bridge = distoNativeBridge();
+  if (bridge) { setStatus('connecting'); bridge.postMessage({ action: 'connect' }); return; }
   if (!navigator.bluetooth) {
     alert('Tento prohlížeč neumí Web Bluetooth. Na iPhonu použijte prohlížeč Bluefy, na PC Chrome/Edge.');
     return;
@@ -132,6 +179,8 @@ export async function connectDisto(): Promise<void> {
 }
 
 export function disconnectDisto(): void {
+  const bridge = distoNativeBridge();
+  if (bridge) { bridge.postMessage({ action: 'disconnect' }); setStatus('disconnected'); return; }
   const d = device;
   device = null; // zastaví reconnect smyčku
   d?.gatt?.disconnect();

@@ -8,6 +8,30 @@
       "port": 5199
     },
     {
+      "name": "dev2",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5299", "--strictPort"],
+      "port": 5299
+    },
+    {
+      "name": "dev3",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5399", "--strictPort"],
+      "port": 5399
+    },
+    {
+      "name": "dev4",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5477", "--strictPort"],
+      "port": 5477
+    },
+    {
+      "name": "dev5",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--port", "5577", "--strictPort"],
+      "port": 5577
+    },
+    {
       "name": "preview",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "preview", "--", "--port", "4188", "--strictPort"],

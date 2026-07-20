@@ -1,6 +1,7 @@
 // Export/import celého projektu jako ZIP: project.json + photos/<id>.
 import JSZip from 'jszip';
 import { allPhotoIds, getPhoto, project, replaceProject, savePhoto } from './db';
+import { saveBlob } from './save-file';
 import type { Project } from './model/types';
 
 export async function exportZip(): Promise<void> {
@@ -12,11 +13,7 @@ export async function exportZip(): Promise<void> {
     if (blob) photos.file(id, blob);
   }
   const blob = await zip.generateAsync({ type: 'blob' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `zaznam-kabelaze-${new Date().toISOString().slice(0, 10)}.zip`;
-  a.click();
-  URL.revokeObjectURL(a.href);
+  await saveBlob(blob, `zaznam-kabelaze-${new Date().toISOString().slice(0, 10)}.zip`);
 }
 
 export async function importZip(file: File): Promise<void> {

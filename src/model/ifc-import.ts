@@ -4,8 +4,8 @@
 // IFCOPENINGELEMENT (+IFCRELVOIDSELEMENT/IFCRELFILLSELEMENT): otvory → obdélníky ve stěně
 // Souřadnice v mm; magicplan používá identitní placementy, rotace ignorujeme.
 import * as WebIFC from 'web-ifc';
-import { newId, type Opening, type Storey, type Wall, type XY } from './types';
-import { projectToAxis } from './geometry';
+import { emptyFace, newId, type Opening, type Room, type Storey, type Wall, type XY } from './types';
+import { buildCornerGraph, computeFaceTrims, computeRoomClearPolygons, projectToAxis } from './geometry';
 
 let apiPromise: Promise<WebIFC.IfcAPI> | null = null;
 
@@ -93,9 +93,7 @@ function parseModel(api: WebIFC.IfcAPI, modelID: number, fileName: string): Stor
       thicknessMm: 0,
       heightMm,
       openings: [],
-      photoIds: [],
-      routes: [],
-      dims: [],
+      faces: { A: emptyFace(), B: emptyFace() },
     };
     // Tloušťka = rozpětí kolmých vzdáleností půdorysného pásu od střednice.
     if (footprint.length >= 3) {
@@ -106,6 +104,9 @@ function parseModel(api: WebIFC.IfcAPI, modelID: number, fileName: string): Stor
     walls.push(wall);
     wallIdByExpressId.set(expressId, wall.id);
   }
+
+  // Viditelný líc: konce stěn zazděné v rozích ořízneme o ½ tloušťky souseda.
+  computeFaceTrims(walls);
 
   // Otvory: IFCRELVOIDSELEMENT (stěna ↔ otvor), IFCRELFILLSELEMENT (otvor ↔ dveře/okno)
   try {
@@ -149,23 +150,35 @@ function parseModel(api: WebIFC.IfcAPI, modelID: number, fileName: string): Stor
     console.warn('Otvory se nepodařilo načíst, pokračuji bez nich:', err);
   }
 
-  // Podlahy pro 3D kontext
-  const slabs: XY[][] = [];
+  // Místnosti z IFCSLAB (magicplan exportuje jeden slab na místnost)
+  const rooms: Room[] = [];
   try {
     const slabIds = api.GetLineIDsWithType(modelID, WebIFC.IFCSLAB);
     for (let i = 0; i < slabIds.size(); i++) {
       const s = api.GetLine(modelID, slabIds.get(i), true);
       const pts = polylinePoints(repItem(s, 'Body')?.SweptArea?.OuterCurve);
-      if (pts.length >= 3) slabs.push(pts);
+      if (pts.length < 3) continue;
+      rooms.push({
+        id: newId(),
+        name: val(s.Name) && val(s.Name) !== 'Slab' ? val(s.Name) : `Místnost ${rooms.length + 1}`,
+        polygon: pts,
+      });
     }
-  } catch { /* podlahy jsou jen kosmetika */ }
+  } catch { /* místnosti jsou jen kontext ve 3D */ }
+
+  // Světlý (vnitřní) obrys místností pro kreslicí plochu podlahy/stropu.
+  computeRoomClearPolygons(walls, rooms);
 
   const heights = walls.map((w) => w.heightMm);
-  return {
+  const storey: Storey = {
     id: newId(),
     name: storeyName,
     wallHeightMm: heights.length ? Math.max(...heights) : 2600,
     walls,
-    slabs,
+    rooms,
   };
+  // Topologický graf rohů (zdroj pravdy pro polohy konců stěn) — postavit hned při
+  // importu, ať čerstvě naimportované podlaží funguje se solverem bez čekání na reload.
+  buildCornerGraph(storey);
+  return storey;
 }

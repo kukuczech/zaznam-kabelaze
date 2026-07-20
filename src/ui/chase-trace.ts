@@ -13,17 +13,24 @@ export interface CostField {
   gray: Float32Array;
 }
 
-/** Dekóduje podklad, zmenší na max. maxDim px delší stranou a spočte šedotón. */
-export async function buildCostField(blob: Blob, maxDim = 480): Promise<CostField> {
-  const bmp = await createImageBitmap(blob);
-  const scale = Math.min(1, maxDim / Math.max(bmp.width, bmp.height));
-  const w = Math.max(1, Math.round(bmp.width * scale));
-  const h = Math.max(1, Math.round(bmp.height * scale));
+/**
+ * Podklad (blob nebo už složený canvas) zmenší na max. maxDim px delší stranou
+ * a spočte šedotón. Canvas umožní složit víc dlaždic do jednoho rastru, aby
+ * přichytávání zohledňovalo všechny textury líce dohromady.
+ */
+export async function buildCostField(source: Blob | HTMLCanvasElement, maxDim = 480): Promise<CostField> {
+  let sw: number, sh: number;
+  let bmp: ImageBitmap | null = null;
+  if (source instanceof Blob) { bmp = await createImageBitmap(source); sw = bmp.width; sh = bmp.height; }
+  else { sw = source.width; sh = source.height; }
+  const scale = Math.min(1, maxDim / Math.max(sw, sh));
+  const w = Math.max(1, Math.round(sw * scale));
+  const h = Math.max(1, Math.round(sh * scale));
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d')!;
-  ctx.drawImage(bmp, 0, 0, w, h);
-  bmp.close?.();
+  ctx.drawImage(bmp ?? (source as HTMLCanvasElement), 0, 0, w, h);
+  bmp?.close?.();
   const d = ctx.getImageData(0, 0, w, h).data;
   const gray = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) {
