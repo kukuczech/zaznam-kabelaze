@@ -437,7 +437,8 @@ export type FixtureKind =
   | 'drainsq'  // podlahová vpust čtvercová
   | 'drainround' // podlahová vpust kulatá
   | 'washsiphon' // sifon pračkový (podomítkový)
-  | 'sinkoutlet'; // vývod na dřez (odpad + voda)
+  | 'sinkoutlet' // vývod na dřez (odpad + voda)
+  | 'multibox'; // vícekrabice — blok pozic osaditelných libovolnými prvky napříč vrstvami
 
 /** Prvek osazený na stěně; (uMm, vMm) je jeho STŘED v souřadnicích stěny. */
 export interface Fixture {
@@ -455,6 +456,12 @@ export interface Fixture {
   code?: string;
   /** Volitelný uživatelský popisek; když chybí, bere se výchozí název typu. */
   label?: string;
+  /**
+   * Počet kusů v bloku vedle sebe (dvoj-/troj-…zásuvka v jednom rámečku), 1–5;
+   * chybí = 1. Blok je JEDEN prvek: (uMm, vMm) je jeho STŘED a od něj se kótuje,
+   * `widthMm` zůstává šířkou jednoho kusu — celková šířka = count × šířka kusu.
+   */
+  count?: number;
 }
 
 /** Tvar značky prvku: obdélník (většina) nebo kruh/elipsa (repro, světlo, čidla). */
@@ -498,6 +505,7 @@ export const FIXTURE_DEFS: Record<FixtureKind, FixtureDef> = {
   drainround: { label: 'Vpust kulatá', color: '#78716c', shape: 'round', wMm: 150, hMm: 150 },
   washsiphon: { label: 'Sifon pračka', color: '#78716c', shape: 'rect', wMm: 100, hMm: 100 },
   sinkoutlet: { label: 'Vývod na dřez', color: '#a8a29e', shape: 'rect', wMm: 90, hMm: 90 },
+  multibox: { label: 'Vícekrabice', color: '#e2e8f0', shape: 'rect', wMm: 80, hMm: 80 },
 };
 
 export const FIXTURE_KINDS = Object.keys(FIXTURE_DEFS) as FixtureKind[];
@@ -505,15 +513,35 @@ export const FIXTURE_KINDS = Object.keys(FIXTURE_DEFS) as FixtureKind[];
 /** Efektivní rozměry prvku (mm) — vlastní hodnoty, jinak výchozí z typu. */
 export function fixtureSize(f: Fixture): { w: number; h: number } {
   const def = FIXTURE_DEFS[f.kind];
-  return { w: f.widthMm ?? def.wMm, h: f.heightMm ?? def.hMm };
+  // Blok víc kusů vedle sebe (dvojzásuvka…) je jeden prvek — šířka se násobí počtem,
+  // takže výběr, kótování i tažení pracují s celým blokem a jeho středem.
+  return { w: (f.widthMm ?? def.wMm) * fixtureCount(f), h: f.heightMm ?? def.hMm };
 }
+
+/** Šířka JEDNOHO kusu bloku (mm) — bez násobení počtem. */
+export function fixtureUnitWidth(f: Fixture): number {
+  return f.widthMm ?? FIXTURE_DEFS[f.kind].wMm;
+}
+
+/** Počet kusů v bloku (1–5); chybí-li, je prvek jednoduchý. */
+export function fixtureCount(f: Fixture): number {
+  return Math.min(Math.max(Math.round(f.count ?? 1), 1), MAX_FIXTURE_COUNT);
+}
+
+/** Nejvíc kusů v jednom bloku (dvoj- až pětizásuvka). */
+export const MAX_FIXTURE_COUNT = 5;
+
+/** Typy, které jde osadit jako blok vedle sebe (společný rámeček). */
+export const MULTI_FIXTURE_KINDS: FixtureKind[] = ['socket'];
 
 /** Popisek pod značkou prvku: číslo/označení a popisek; když chybí, název typu. */
 export function fixtureCaption(f: Fixture): string {
   const parts: string[] = [];
   if (f.code?.trim()) parts.push(f.code.trim());
   if (f.label?.trim()) parts.push(f.label.trim());
-  return parts.length ? parts.join(' · ') : FIXTURE_DEFS[f.kind].label;
+  const n = fixtureCount(f);
+  if (parts.length) return parts.join(' · ');
+  return n > 1 ? `${n}× ${FIXTURE_DEFS[f.kind].label.toLowerCase()}` : FIXTURE_DEFS[f.kind].label;
 }
 
 export interface Dimension {

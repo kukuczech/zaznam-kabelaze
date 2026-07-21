@@ -1,7 +1,7 @@
 // Statické vykreslení elevace stěny do SVG (sdílené editorem i tiskem).
 // Zobrazovací souřadnice: x = displayU (mm), y = heightMm − v (osa y dolů).
 import { displayU, displayUInverse, faceEndMm, faceLenMm, faceStartMm, type WallSide } from '../model/geometry';
-import { FIXTURE_DEFS, fixtureSize, fixtureCaption, isCategoryVisible, type Anchor, type Category, type Dimension, type Fixture, type FixtureKind, type Wall, type WallArea, type XY } from '../model/types';
+import { FIXTURE_DEFS, fixtureSize, fixtureCaption, fixtureCount, isCategoryVisible, type Anchor, type Category, type Dimension, type Fixture, type FixtureKind, type Wall, type WallArea, type XY } from '../model/types';
 
 export interface ViewBox {
   x: number;
@@ -198,15 +198,21 @@ export function fixtureMarkerSvg(wall: Wall, side: WallSide, f: Fixture, print: 
   const bg = print ? '#ffffff' : '#0b1220';
   const label = fixtureCaption(f);
   // symbol zmenšíme, aby se vešel do menšího rozměru s okrajem; strop kvůli čitelnosti
-  const glyphS = Math.max(Math.min(Math.min(w, h) * 0.3, 90), 22);
+  // (u bloku se počítá z JEDNOHO kusu, ne z celé šířky bloku)
+  const glyphS = Math.max(Math.min(Math.min(w / fixtureCount(f), h) * 0.3, 90), 22);
   const ring = highlighted
     ? fixtureOutline(def.shape, c.x, c.y, w, h, 'none', '#22d3ee', 30, 0.75, 80)
     : '';
+  // Blok víc kusů vedle sebe (dvoj-/trojzásuvka…): jeden prvek, ale n značek v řadě
+  // symetricky kolem středu — kótuje se od středu bloku.
+  const n = fixtureCount(f);
+  const unit = w / n;
+  const cells = Array.from({ length: n }, (_, i) => c.x - w / 2 + unit * (i + 0.5));
   return (
     `<g data-fixture="${f.id}">` +
     ring +
-    fixtureOutline(def.shape, c.x, c.y, w, h, bg, def.color, 18, print ? 1 : 0.95) +
-    `<g transform="translate(${c.x} ${c.y})">${fixtureGlyph(f.kind, glyphS, def.color)}</g>` +
+    cells.map((x) => fixtureOutline(def.shape, x, c.y, unit, h, bg, def.color, 18, print ? 1 : 0.95)).join('') +
+    cells.map((x) => `<g transform="translate(${x} ${c.y})">${fixtureGlyph(f.kind, glyphS, def.color)}</g>`).join('') +
     `<text x="${c.x}" y="${(c.y + h / 2 + 170).toFixed(1)}" text-anchor="middle" font-size="130" font-weight="bold" fill="${print ? '#111' : def.color}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="36">${esc(label)}</text>` +
     `</g>`
   );

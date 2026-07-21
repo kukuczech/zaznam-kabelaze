@@ -1,7 +1,7 @@
 // Elevation editor stěny: kreslení tras, kóty, fotky, DISTO plnění délek.
 import { project, saveProject, savePhoto, getPhoto, deletePhoto, undo, redo, canUndo, canRedo, onHistoryChange } from '../db';
 import { distToSegment, faceCeilingPolyline, faceEndMm, faceLenMm, faceStartMm, type WallSide } from '../model/geometry';
-import { newId, resolveBackgrounds, roomSurfaces, FIXTURE_DEFS, FIXTURE_KINDS, FIXTURE_LAYER, fixtureSize, defaultCategoryForFixture, fixtureLayerIds, fixtureKindsForLayer, isCategoryVisible, type Anchor, type Dimension, type Fixture, type FixtureKind, type Route, type Wall, type WallArea, type WallBackground, type XY } from '../model/types';
+import { newId, resolveBackgrounds, roomSurfaces, FIXTURE_DEFS, FIXTURE_KINDS, FIXTURE_LAYER, MAX_FIXTURE_COUNT, MULTI_FIXTURE_KINDS, fixtureSize, fixtureCount, fixtureUnitWidth, defaultCategoryForFixture, fixtureLayerIds, fixtureKindsForLayer, isCategoryVisible, type Anchor, type Dimension, type Fixture, type FixtureKind, type Route, type Wall, type WallArea, type WallBackground, type XY } from '../model/types';
 import { clearDistoTarget, connectDisto, onDistoStatus, setDistoTarget } from '../disto';
 import { affine3, areaDisplayRect, rectDisplayRect, dimEndpoints, dimGeomLengthMm, fixtureThumbSvg, fromDisplay, meshTriangles, resolveAnchor, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
 import { registerCleanup, route } from '../main';
@@ -9,6 +9,9 @@ import { mapPhotoToWall, rewarpToAspect } from './photo-map';
 import { buildCostField, snapPathPx, simplifyPath, type CostField } from './chase-trace';
 
 type Mode = 'select' | 'draw' | 'area' | 'dim' | 'place' | 'photo';
+
+/** Hrana líce, ke které se kótuje (levá/pravá jsou kanonické, zobrazení může zrcadlit). */
+type EdgeName = 'top' | 'bottom' | 'left' | 'right';
 
 /**
  * Rozkreslený šlic, ve kterém se má po překreslení obrazovky pokračovat.
@@ -186,6 +189,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   let paletteLayerId = defaultCategoryForFixture('socket'); // vrstva zvolená v paletě (řídí filtr ikon)
   let placeKind: FixtureKind = 'socket';
   let placeCategoryId = paletteLayerId; // vrstva nově osazovaných prvků = zvolená vrstva palety
+  let lastPlacedId: string | null = null; // naposledy osazený prvek (paleta k němu nabízí kóty)
   let draggingFixtureId: string | null = null;
   let fixtureGrab = { dx: 0, dy: 0 };        // odsazení středu prvku od kurzoru (px) — úchop za roh
   let fixtureMoved = false;
@@ -1210,11 +1214,11 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   }
 
   /** Hrana líce, která je v čelním pohledu vlevo (displayU může osu zrcadlit). */
-  const leftEdgeName = (): 'left' | 'right' =>
+  const leftEdgeName = (): EdgeName =>
     toDisplay(W, side, U0, 0).x <= toDisplay(W, side, U1, 0).x ? 'left' : 'right';
 
   /** Lidský popis hrany z pohledu uživatele (vlevo/vpravo dle zobrazení, ne dle osy). */
-  function edgeLabel(e: 'top' | 'bottom' | 'left' | 'right'): string {
+  function edgeLabel(e: EdgeName): string {
     if (e === 'top') return isPlan ? 'od horního okraje' : 'od stropu';
     if (e === 'bottom') return isPlan ? 'od dolního okraje' : 'od podlahy';
     return e === leftEdgeName() ? 'od levého kraje' : 'od pravého kraje';
@@ -1225,7 +1229,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
    * (routeSeg, t = 0.5) — celý rovný úsek se pak posune jako celek (viz applyDimValue).
    * Existuje-li už táž kóta, jen se znovu nabídne k zadání míry.
    */
-  function dimDraftSegToEdge(edge: 'top' | 'bottom' | 'left' | 'right'): void {
+  function dimDraftSegToEdge(edge: EdgeName): void {
     if (!draft || draft.points.length < 2) return;
     const i = draft.points.length - 2;
     ensureDraftLive(); // kóta musí kotvit na trasu dohledatelnou v F.routes
@@ -1294,7 +1298,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     if (draft.points.length >= 2) {
       const a = draft.points[draft.points.length - 2], b = draft.points[draft.points.length - 1];
       const adu = Math.abs(b.x - a.x), adv = Math.abs(b.y - a.y);
-      const edges: ('top' | 'bottom' | 'left' | 'right')[] =
+      const edges: EdgeName[] =
         adv > adu * 1.2 ? ['left', 'right']
         : adu > adv * 1.2 ? ['top', 'bottom']
         : ['left', 'right', 'top', 'bottom'];
@@ -1305,7 +1309,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       lbl.textContent = 'Kóta úsečky:';
       dimRow.appendChild(lbl);
       // Vlevo/vpravo seřadit tak, jak to uživatel vidí na obrazovce.
-      const ord = (e: 'top' | 'bottom' | 'left' | 'right'): number =>
+      const ord = (e: EdgeName): number =>
         e === leftEdgeName() ? 0 : e === 'left' || e === 'right' ? 1 : e === 'top' ? 2 : 3;
       const shown = edges.slice().sort((x, y) => ord(x) - ord(y));
       for (const e of shown) {
@@ -1388,13 +1392,13 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   function showSelectPanel(): void {
     panel.innerHTML = '';
     const r = F.routes.find((x) => x.id === selectedRouteId);
+    // Čerstvá fotostěna (bez měřítka) a nic vybraného → nabídnout ořez rovnou,
+    // ať se nemusí hledat v panelu fotek. Po oříznutí naváže přeměření.
+    if (!r && isPhotoWall && noScale()) { showCropOffer(); return; }
     if (!r) { panel.className = ''; return; }
     panel.className = 'card no-print';
 
     const hint = document.createElement('div');
-    // Čerstvá fotostěna (bez měřítka) a nic vybraného → nabídnout ořez rovnou,
-    // ať se nemusí hledat v panelu fotek. Po oříznutí naváže přeměření.
-    if (!r && isPhotoWall && noScale()) { showCropOffer(); return; }
     hint.className = 'muted';
     hint.textContent = 'Uzly: táhni puntík = posun (přichytí se na prvek), dvojklik na uzel = smazat. Nový uzel se vkládá v ✏️ Trase. Delete smaže celou trasu.';
     panel.appendChild(hint);
@@ -1877,10 +1881,6 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     panel.className = 'card no-print';
     panel.innerHTML = '';
 
-    // --- Napasované podklady (dlaždice — zobrazí se všechny naráz) ---
-    const active = activeBg();
-    if (active && F.backgrounds.length) {
-      const hint = document.createElement('div');
     // Fotostěna: ořez na skutečnou stěnu (4 rohy + narovnání) a přeměření rozměrů.
     if (isPhotoWall) {
       const row = document.createElement('div');
@@ -1905,6 +1905,10 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       panel.appendChild(row);
     }
 
+    // --- Napasované podklady (dlaždice — zobrazí se všechny naráz) ---
+    const active = activeBg();
+    if (active && F.backgrounds.length) {
+      const hint = document.createElement('div');
       hint.className = 'muted';
       hint.style.cssText = 'font-size:12px;margin-bottom:6px';
       hint.textContent = 'Dlaždici posuň tažením, roztáhni za rohy, otoč modrým úchopem. „⇱ Volné rohy" = tahej každý roh zvlášť (perspektiva, pro slícování fotek).';
@@ -2181,6 +2185,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     };
     F.fixtures.push(f);
     selectedFixtureId = f.id;
+    lastPlacedId = f.id; // paleta k němu hned nabídne kóty k hranám
     ensureCategoryVisible(placeCategoryId); // ať osazený prvek hned neschová skrytá vrstva
     saveProject();
     redraw();
@@ -2264,12 +2269,12 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
    * Paleta prvků řízená vrstvou — nahoře výběr vrstvy, pod ním jen ikony patřící
    * dané vrstvě. Táhni je na stěnu (nebo klikni a ťukni do stěny).
    */
-  function showPlacePanel(): void {
+  function showPlacePanel(focusEdge?: EdgeName): void {
     panel.className = 'card no-print';
     panel.innerHTML = '';
     const hint = document.createElement('div');
     hint.className = 'muted';
-    hint.textContent = 'Přetáhni prvek na stěnu (nebo ho klikni a ťukni do stěny). Posun/kóty pak v režimech 👆 a 📏. Pořadí ikon nastavíš v ⚙️ Prvky.';
+    hint.textContent = 'Přetáhni prvek na stěnu (nebo ho klikni a ťukni do stěny). Kóty právě osazeného prvku zadáš dole. Pořadí ikon nastavíš v ⚙️ Prvky.';
     panel.appendChild(hint);
 
     // Vrstva palety — nabídne jen vrstvy, které mají prvky; její volba filtruje ikony.
@@ -2315,6 +2320,123 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       grid.appendChild(item);
     }
     panel.appendChild(grid);
+
+    // Právě osazený prvek: kóty k hranám rovnou tady, ať se nemusí přepínat režim.
+    const last = lastPlacedId ? F.fixtures.find((x) => x.id === lastPlacedId) : undefined;
+    if (last) {
+      const cap = document.createElement('div');
+      cap.className = 'muted';
+      cap.style.marginTop = '6px';
+      cap.textContent = `Osazeno: ${last.label || FIXTURE_DEFS[last.kind].label}${last.code ? ` (${last.code})` : ''}`;
+      panel.appendChild(cap);
+      const cntRow = document.createElement('div');
+      cntRow.className = 'row';
+      appendFixtureCount(cntRow, last, () => showPlacePanel());
+      if (cntRow.childElementCount) panel.appendChild(cntRow);
+      appendFixtureEdgeDims(panel, last, (fe) => showPlacePanel(fe), focusEdge);
+    }
+  }
+
+  /**
+   * Výběr počtu kusů v bloku (1× až 5×) — u typů, které se osazují vedle sebe do
+   * společného rámečku (zásuvky). Blok zůstává JEDNÍM prvkem: roste symetricky
+   * kolem svého středu, takže kóty se měří od středu bloku.
+   */
+  function appendFixtureCount(host: HTMLElement, f: Fixture, rerender: () => void): void {
+    if (!MULTI_FIXTURE_KINDS.includes(f.kind)) return;
+    const row = document.createElement('label');
+    row.className = 'muted';
+    row.style.cssText = 'display:inline-flex;align-items:center;gap:6px';
+    row.textContent = 'Počet v bloku:';
+    const sel = document.createElement('select');
+    sel.title = 'Kolik kusů vedle sebe (kótuje se od středu bloku)';
+    for (let n = 1; n <= MAX_FIXTURE_COUNT; n++) {
+      const o = document.createElement('option');
+      o.value = String(n);
+      o.textContent = n === 1 ? '1× (jednoduchá)' : `${n}×`;
+      if (n === fixtureCount(f)) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.onchange = () => {
+      const n = Number(sel.value);
+      f.count = n > 1 ? n : undefined; // 1 = výchozí, do dat se nezapisuje
+      saveProject();
+      redraw();
+      rerender();
+    };
+    row.appendChild(sel);
+    host.appendChild(row);
+  }
+
+  /** Kóta prvku k dané hraně líce (nejvýš jedna na hranu), pokud už existuje. */
+  function fixtureEdgeDim(fixtureId: string, edge: EdgeName): Dimension | undefined {
+    return F.dims.find((d) =>
+      d.from.kind === 'fixture' && d.from.fixtureId === fixtureId &&
+      d.to.kind === 'edge' && d.to.edge === edge);
+  }
+
+  /** Hrany v pořadí, v jakém je uživatel vidí: vlevo, vpravo, nahoře, dole. */
+  const edgesInViewOrder = (): EdgeName[] => {
+    const l = leftEdgeName();
+    return [l, l === 'left' ? 'right' : 'left', 'top', 'bottom'];
+  };
+
+  /**
+   * Kóty prvku ke čtyřem hranám líce. Zadávat je lze postupně a nezávisle (klidně
+   * všechny čtyři): hrana bez kóty se nabídne tlačítkem, hotová kóta má pole (cíl
+   * metru) a ✕ ke zrušení. Zadaná míra prvek rovnou posune (applyDimValue).
+   * `rerender` překreslí hostitelský panel (prvek / paleta), `focusEdge` zaostří
+   * právě přidanou kótu, ať se míra dá hned napsat nebo pípnout.
+   */
+  function appendFixtureEdgeDims(host: HTMLElement, f: Fixture, rerender: (focus?: EdgeName) => void, focusEdge?: EdgeName): void {
+    const btnRow = document.createElement('div');
+    btnRow.className = 'row';
+    btnRow.style.flexWrap = 'wrap';
+    const cap = document.createElement('span');
+    cap.className = 'muted';
+    cap.textContent = 'Kóta prvku:';
+    btnRow.appendChild(cap);
+    let any = false;
+    for (const e of edgesInViewOrder()) {
+      if (fixtureEdgeDim(f.id, e)) continue;
+      const b = document.createElement('button');
+      b.textContent = `📏 ${edgeLabel(e)}`;
+      b.onclick = () => {
+        F.dims.push({ id: newId(), from: { kind: 'fixture', fixtureId: f.id }, to: { kind: 'edge', edge: e }, valueMm: null });
+        saveProject();
+        redraw();
+        rerender(e);
+      };
+      btnRow.appendChild(b);
+      any = true;
+    }
+    if (any) host.appendChild(btnRow);
+    for (const e of edgesInViewOrder()) {
+      const d = fixtureEdgeDim(f.id, e);
+      if (!d) continue;
+      const row = document.createElement('div');
+      row.className = 'row';
+      const lbl = document.createElement('span');
+      lbl.className = 'muted';
+      lbl.textContent = `${edgeLabel(e)} (mm):`;
+      const apply = (mm: number) => { applyDimValue(d, mm); rerender(); };
+      const geom = dimGeomLengthMm(W, side, d);
+      const input = lengthInput(d.valueMm ?? (geom != null ? Math.round(geom) : null), apply);
+      input.style.width = '110px';
+      const del = document.createElement('button');
+      del.className = 'danger';
+      del.textContent = '✕';
+      del.title = 'Kótu zrušit';
+      del.onclick = () => {
+        F.dims = F.dims.filter((x) => x.id !== d.id);
+        saveProject();
+        redraw();
+        rerender();
+      };
+      row.append(lbl, input, del);
+      host.appendChild(row);
+      if (e === focusEdge) { setDistoTarget(input, apply); input.focus(); input.select(); }
+    }
   }
 
   /** Smaže prvek i kóty, které z něj vedou. Používá tlačítko 🗑 i klávesa Delete. */
@@ -2324,6 +2446,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       !(d.from.kind === 'fixture' && d.from.fixtureId === f.id) &&
       !(d.to.kind === 'fixture' && d.to.fixtureId === f.id));
     selectedFixtureId = null;
+    if (lastPlacedId === f.id) lastPlacedId = null;
     saveProject();
     redraw();
     panel.innerHTML = '';
@@ -2357,7 +2480,8 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   }
 
   /** Panel vybraného prvku — změna typu, popisek, smazání. */
-  function showFixturePanel(f: Fixture): void {
+  /** @param focusEdge hrana, jejíž právě přidaná kóta se rovnou zaostří (cíl metru). */
+  function showFixturePanel(f: Fixture, focusEdge?: EdgeName): void {
     selectedFixtureId = f.id;
     panel.className = 'card no-print';
     panel.innerHTML = '';
@@ -2415,21 +2539,27 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       inp.onchange = () => { const mm = Number(inp.value); apply(mm > 0 ? mm : NaN); saveProject(); redraw(); };
       return inp;
     };
-    const wIn = mkSize(eff.w, (mm) => { f.widthMm = Number.isFinite(mm) ? Math.round(mm) : undefined; if (round) { f.heightMm = f.widthMm; } showFixturePanel(f); }, 'Šířka (mm)');
+    // U bloku (dvojzásuvka…) je šířka rozměrem JEDNOHO kusu — celek = počet × šířka.
+    const wIn = mkSize(fixtureUnitWidth(f), (mm) => { f.widthMm = Number.isFinite(mm) ? Math.round(mm) : undefined; if (round) { f.heightMm = f.widthMm; } showFixturePanel(f); }, 'Šířka jednoho kusu (mm)');
     const hIn = mkSize(eff.h, (mm) => { f.heightMm = Number.isFinite(mm) ? Math.round(mm) : undefined; if (round) { f.widthMm = f.heightMm; } showFixturePanel(f); }, 'Výška / průměr (mm)');
     const lbl = document.createElement('span');
     lbl.className = 'muted';
-    lbl.textContent = round ? 'průměr mm:' : 'rozměr š × v mm:';
+    lbl.textContent = round ? 'průměr mm:' : fixtureCount(f) > 1 ? 'rozměr 1 ks š × v mm:' : 'rozměr š × v mm:';
     if (round) {
       sizeRow.append(lbl, wIn); // kruh: stačí jeden rozměr (průměr)
     } else {
       sizeRow.append(lbl, wIn, Object.assign(document.createElement('span'), { textContent: '×', className: 'muted' }), hIn);
     }
+    sizeRow.appendChild(document.createTextNode(' '));
+    appendFixtureCount(sizeRow, f, () => showFixturePanel(f));
     panel.appendChild(sizeRow);
+
+    // Kóty ke čtyřem hranám líce — postupně kterákoli (i všechny), míra prvek posune.
+    appendFixtureEdgeDims(panel, f, (fe) => showFixturePanel(f, fe), focusEdge);
 
     const hint = document.createElement('div');
     hint.className = 'muted';
-    hint.textContent = 'Táhni prvek pro posun. Kóty ke stropu/stěně přidej v režimu 📏 Kóta, šlic mezi prvky v ✏️ Trasa.';
+    hint.textContent = 'Táhni prvek pro posun. Kóty k hranám zadáš výše (napsat nebo pípnout metrem), kóty mezi prvky v 📏 Kóta, šlic mezi prvky v ✏️ Trasa.';
     panel.appendChild(hint);
   }
 
@@ -2583,6 +2713,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     dimFirst = null;
     selectedDimId = null;
     pendingDimId = null;
+    lastPlacedId = null;
     selectedFixtureId = null;
     areaFirst = null;
     selectedAreaId = null;
