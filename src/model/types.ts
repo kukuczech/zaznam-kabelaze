@@ -234,10 +234,17 @@ export interface Wall {
    */
   planOutline?: XY[];
   /**
-   * Plocha BEZ MĚŘÍTKA — fotostěna. Rozměry (`axis`, `heightMm`) jsou jen poměr
-   * stran fotky, ne skutečné milimetry. Kóta je proto pouhý POPISEK naměřené
-   * hodnoty: nic neposouvá a nehlásí rozpor s geometrií (viz applyDimValue
-   * v elevation.ts a `conflict` ve wall-svg.ts). Kreslí se jen líc A.
+   * Fotostěna — kreslicí plocha založená z fotky, ne ze skenu. Má jediný líc (A),
+   * ve 3D se neotvírá a v exportech se neoznačuje stranou. Identita plochy: platí
+   * i potom, co se stěna přeměří a získá měřítko (na rozdíl od `freeScale`).
+   */
+  photoWall?: boolean;
+  /**
+   * Plocha BEZ MĚŘÍTKA. Rozměry (`axis`, `heightMm`) jsou jen poměr stran fotky,
+   * ne skutečné milimetry, takže kóta je pouhý POPISEK naměřené hodnoty: nic
+   * neposouvá a nehlásí rozpor s geometrií (viz applyDimValue v elevation.ts a
+   * `conflict` ve wall-svg.ts). Zmizí, jakmile se fotostěna ořízne na stěnu
+   * a přeměří — od té chvíle jsou milimetry skutečné a kóty fungují normálně.
    */
   freeScale?: boolean;
   /** Dva nezávislé líce stěny — obsah (trasy, kóty, prvky, podklady) je pro každý zvlášť. */
@@ -706,7 +713,8 @@ export function photoWallSurface(name: string, aspect: number): Wall {
     thicknessMm: 0,
     heightMm: h,
     openings: [],
-    freeScale: true,
+    photoWall: true,
+    freeScale: true, // dokud se stěna neořízne a nepřeměří, jsou rozměry jen poměr stran
     faces: { A: emptyFace(), B: emptyFace() },
   };
 }

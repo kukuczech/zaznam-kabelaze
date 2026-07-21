@@ -2,10 +2,10 @@
 import { project, saveProject, savePhoto, getPhoto, deletePhoto, undo, redo, canUndo, canRedo, onHistoryChange } from '../db';
 import { distToSegment, faceCeilingPolyline, faceEndMm, faceLenMm, faceStartMm, type WallSide } from '../model/geometry';
 import { newId, resolveBackgrounds, roomSurfaces, FIXTURE_DEFS, FIXTURE_KINDS, FIXTURE_LAYER, fixtureSize, defaultCategoryForFixture, fixtureLayerIds, fixtureKindsForLayer, isCategoryVisible, type Anchor, type Dimension, type Fixture, type FixtureKind, type Route, type Wall, type WallArea, type WallBackground, type XY } from '../model/types';
-import { connectDisto, onDistoStatus, setDistoTarget } from '../disto';
+import { clearDistoTarget, connectDisto, onDistoStatus, setDistoTarget } from '../disto';
 import { affine3, areaDisplayRect, rectDisplayRect, dimEndpoints, dimGeomLengthMm, fixtureThumbSvg, fromDisplay, meshTriangles, resolveAnchor, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
 import { registerCleanup, route } from '../main';
-import { mapPhotoToWall } from './photo-map';
+import { mapPhotoToWall, rewarpToAspect } from './photo-map';
 import { buildCostField, snapPathPx, simplifyPath, type CostField } from './chase-trace';
 
 type Mode = 'select' | 'draw' | 'area' | 'dim' | 'place' | 'photo';
@@ -60,9 +60,11 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   if (!wall) { location.hash = '#/'; return; }
   const W = wall;
   const F = W.faces[side]; // obsah tohoto líce (trasy, kóty, prvky, podklady); otvory jsou sdílené na W
-  const isPlan = !!W.planOutline; // podlaha/strop místnosti (půdorysná plocha), ne svislá stěna
-  const isPhoto = !!W.freeScale;  // fotostěna: plocha bez měřítka, kreslí se jen líc A
-  const oneFace = isPlan || isPhoto; // plochy s jediným lícem — přepínač strany nemá smysl
+  const isPlan = !!W.planOutline;   // podlaha/strop místnosti (půdorysná plocha), ne svislá stěna
+  const isPhotoWall = !!W.photoWall; // fotostěna (identita — platí i po přeměření)
+  const oneFace = isPlan || isPhotoWall; // plochy s jediným lícem — přepínač strany nemá smysl
+  /** Plocha bez měřítka: rozměry jsou jen poměr stran fotky (mizí po přeměření). */
+  const noScale = (): boolean => !!W.freeScale;
   // Viditelný líc stěny: kreslíme a ořezáváme na [U0, U1] v ose (u od axis[0]);
   // zobrazovací šířka je FL. Uložené souřadnice zůstávají v ose stěny.
   const FL = faceLenMm(W, side); // délka viditelného líce (zobrazovací šířka)
@@ -94,7 +96,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
   root.innerHTML = `
     <header class="bar">
       <button id="back">←</button>
-      <h1>${W.name} <span class="muted" style="font-size:13px">(${isPlan ? 'půdorys' : isPhoto ? 'fotostěna' : `strana ${side}`})</span></h1>
+      <h1>${W.name} <span class="muted" style="font-size:13px">(${isPlan ? 'půdorys' : isPhotoWall ? 'fotostěna' : `strana ${side}`})</span></h1>
       ${oneFace ? '' : `<button id="flip-side" title="Přepnout na druhý líc stěny">⇄ strana ${side === 'A' ? 'B' : 'A'}</button>`}
       <button id="undo" title="Zpět (Ctrl+Z)">↶</button>
       <button id="redo" title="Vpřed (Ctrl+Shift+Z)">↷</button>
@@ -125,7 +127,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
 
   // Fotostěna 3D pohled nemá — zpět se vrací na titulku, odkud se zakládá.
   root.querySelector('#back')!.addEventListener('click', () =>
-    (location.hash = isPhoto ? '#/' : `#/storey/${storeyId}`));
+    (location.hash = isPhotoWall ? '#/' : `#/storey/${storeyId}`));
   // Přepnout na druhý líc téže stěny (šlice/kóty/prvky má každá strana vlastní).
   root.querySelector('#flip-side')?.addEventListener('click', () => {
     commitDraft(); // rozkreslený šlic uzavřít, ať se neztratí
@@ -428,7 +430,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       selectedAreaId,
       // Kontrolní kóta rozměru (světlá míra) pro porovnání s naměřeným. Fotostěna
       // měřítko nemá, tam by ukazovala nesmyslné číslo → vynechat.
-      refDims: !isPhoto,
+      refDims: !noScale(),
       // Šikmý strop (podkroví): líc se ukončí skloněnou hranou a obsah nad ni se ořízne.
       ceilingTop: storey ? faceCeilingPolyline(storey, W, side) ?? undefined : undefined,
     });
@@ -565,7 +567,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     const ed = dimEdge(dim);          // hrana, od které se měří
     // Fotostěna nemá měřítko: kóta je jen zapsaná naměřená hodnota (vztažená
     // k rohu / hraně fotky). Geometrií nehýbeme — zákres by se rozjel.
-    if (ra && ed && !isPhoto) {
+    if (ra && ed && !noScale()) {
       const axis = edgeAxis(ed.edge);
       const p = resolveAnchor(W, side, ra); // aktuální poloha kótované entity
       if (p) {
@@ -1390,6 +1392,9 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     panel.className = 'card no-print';
 
     const hint = document.createElement('div');
+    // Čerstvá fotostěna (bez měřítka) a nic vybraného → nabídnout ořez rovnou,
+    // ať se nemusí hledat v panelu fotek. Po oříznutí naváže přeměření.
+    if (!r && isPhotoWall && noScale()) { showCropOffer(); return; }
     hint.className = 'muted';
     hint.textContent = 'Uzly: táhni puntík = posun (přichytí se na prvek), dvojklik na uzel = smazat. Nový uzel se vkládá v ✏️ Trase. Delete smaže celou trasu.';
     panel.appendChild(hint);
@@ -1496,7 +1501,8 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
    * existující podklad (zachová id/popisek/průhlednost); jinak přidá NOVÝ podklad
    * a přepne na něj (stěna tak může mít víc napasovaných fotek).
    */
-  async function mapAsBackground(sourceBlob: Blob, sourcePhotoId?: string, targetBgId?: string): Promise<void> {
+  /** Vrací true, když uživatel pasování dokončil (false = zrušil). */
+  async function mapAsBackground(sourceBlob: Blob, sourcePhotoId?: string, targetBgId?: string): Promise<boolean> {
     const existing = targetBgId ? F.backgrounds.find((b) => b.id === targetBgId) : undefined;
     // Podlaha/strop: rohy místnosti (planOutline) mají známou cílovou pozici v líci
     // → naklikat je a narovnat least-squares homografií (i nepravidelný tvar).
@@ -1525,7 +1531,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       initialMirror: existing?.mirror,
       plan,
     });
-    if (!result) return;
+    if (!result) return false;
     const photoId = newId();
     await savePhoto(photoId, result.blob);
     if (existing) {
@@ -1553,7 +1559,168 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     invalidateCostField();
     await loadBackground();
     redraw();
-    showPhotoPanel();
+    // Vykreslit panel SYNCHRONNĚ vůči volajícímu: showPhotoPanel je async (čte fotky
+    // z úložiště) a bez čekání by se dokreslil až přes panel, který volající zobrazí
+    // po nás (např. přeměření po ořezu fotostěny).
+    await showPhotoPanel();
+    return true;
+  }
+
+  /**
+   * FOTOSTĚNA — ořez na skutečnou stěnu: označíš 4 rohy stěny na fotce, obraz se
+   * perspektivně narovná a vyplní celý líc. Hned potom se nabídne přeměření šířky
+   * a výšky (viz showSizePanel), po kterém plocha získá skutečné měřítko.
+   */
+  async function cropPhotoWall(): Promise<void> {
+    const bg = activeBg();
+    // Pasujeme vždy z ORIGINÁLU (ne z už narovnaného obrazu), ať se nevrství zkreslení.
+    const sourceId = bg?.sourcePhotoId ?? bg?.photoId ?? F.photoIds[0];
+    if (!sourceId) return;
+    const blob = await getPhoto(sourceId);
+    if (!blob) return;
+    if (await mapAsBackground(blob, sourceId, bg?.id)) showSizePanel();
+  }
+
+  /** Nabídka ořezu na čerstvé fotostěně — první, co uvidíš po založení. */
+  function showCropOffer(): void {
+    panel.className = 'card no-print';
+    panel.innerHTML = '';
+    const hint = document.createElement('div');
+    hint.className = 'muted';
+    hint.style.cssText = 'font-size:12px;margin-bottom:6px';
+    hint.textContent = 'Můžeš rovnou kreslit (kóty budou popisky naměřených hodnot). Nebo fotku ořízni na stěnu: označíš 4 rohy, perspektiva se narovná a po přeměření šířky a výšky dostane plocha skutečné měřítko.';
+    const row = document.createElement('div');
+    row.className = 'row';
+    const crop = document.createElement('button');
+    crop.className = 'primary';
+    crop.textContent = '✂️ Oříznout na stěnu';
+    crop.onclick = () => void cropPhotoWall();
+    row.append(crop);
+    panel.append(hint, row);
+  }
+
+  /**
+   * Přeměření fotostěny: šířka → výška. Pole je rovnou cílem metru, takže stačí
+   * odpípnout — hodnota se doplní a cíl přeskočí na druhé pole. Po potvrzení dostane
+   * plocha skutečné rozměry (viz applyRealSize).
+   */
+  function showSizePanel(): void {
+    panel.className = 'card no-print';
+    panel.innerHTML = '';
+    const hint = document.createElement('div');
+    hint.className = 'muted';
+    hint.style.cssText = 'font-size:12px;margin-bottom:6px';
+    hint.textContent = 'Přeměř stěnu: klikni do pole a odpípni metrem (nebo napiš ručně). Po změření šířky přeskočí cíl na výšku. Tím plocha získá skutečné měřítko a kóty začnou fungovat jako u naskenované stěny.';
+    panel.appendChild(hint);
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.cssText = 'align-items:center;gap:8px;flex-wrap:wrap';
+
+    const mkInput = (ph: string, val: number): HTMLInputElement => {
+      const i = document.createElement('input');
+      i.type = 'number'; i.inputMode = 'numeric'; i.placeholder = ph;
+      i.value = String(Math.round(val));
+      i.style.width = '110px';
+      return i;
+    };
+    const wIn = mkInput('šířka mm', FL);
+    const hIn = mkInput('výška mm', W.heightMm);
+
+    // Metr míří nejdřív na šířku; po naměření sám přeskočí na výšku.
+    const aimHeight = (): void => {
+      hIn.focus(); hIn.select();
+      setDistoTarget(hIn, () => { /* hodnotu zapíše disto do pole */ });
+    };
+    const aimWidth = (): void => {
+      wIn.focus(); wIn.select();
+      setDistoTarget(wIn, () => aimHeight());
+    };
+    wIn.addEventListener('focus', () => setDistoTarget(wIn, () => aimHeight()));
+    hIn.addEventListener('focus', () => setDistoTarget(hIn, () => { /* poslední pole */ }));
+    registerCleanup(() => clearDistoTarget());
+
+    const go = document.createElement('button');
+    go.className = 'primary';
+    go.textContent = '✓ Použít rozměry';
+    go.onclick = () => {
+      const w = Number(wIn.value), h = Number(hIn.value);
+      if (!(w > 0) || !(h > 0)) return;
+      clearDistoTarget();
+      applyRealSize(Math.round(w), Math.round(h));
+    };
+    const skip = document.createElement('button');
+    skip.textContent = 'Zatím neměřit';
+    skip.onclick = () => { clearDistoTarget(); showPhotoPanel(); };
+
+    row.append(
+      Object.assign(document.createElement('span'), { className: 'muted', textContent: 'Šířka' }), wIn,
+      Object.assign(document.createElement('span'), { className: 'muted', textContent: 'Výška' }), hIn,
+      go, skip,
+    );
+    panel.appendChild(row);
+    aimWidth();
+  }
+
+  /**
+   * Nastaví fotostěně skutečné rozměry (mm). Zákres se přeškáluje ve stejném poměru
+   * jako plocha, aby zůstal sedět na fotce, podklad se znovu narovná z originálu na
+   * nový poměr stran a `freeScale` zmizí — od téhle chvíle jsou milimetry skutečné
+   * a kóty posouvají geometrii jako u naskenované stěny.
+   */
+  async function applyRealSize(widthMm: number, heightMm: number): Promise<void> {
+    const kx = widthMm / FL, ky = heightMm / W.heightMm;
+    scaleFaceContent(kx, ky);
+    W.axis = [{ x: 0, y: 0 }, { x: widthMm, y: 0 }];
+    W.heightMm = heightMm;
+    W.measuredLengthMm = widthMm; // šířka je naměřená pravda
+    delete W.freeScale;
+    // Podklad přepočítat z originálu podle už označených rohů — jedno převzorkování
+    // místo roztažení už narovnaného obrazu.
+    const bg = activeBg();
+    if (bg?.corners?.length === 4 && bg.sourcePhotoId) {
+      const src = await getPhoto(bg.sourcePhotoId);
+      if (src) {
+        const blob = await rewarpToAspect(src, bg.corners, bg.rotDeg ?? 0, !!bg.mirror, widthMm / heightMm);
+        if (blob) {
+          const id = newId();
+          await savePhoto(id, blob);
+          await deletePhoto(bg.photoId);
+          bg.photoId = id;
+        }
+      }
+    }
+    saveProject();
+    invalidateCostField();
+    // Rozměry líce jsou v uzávěrách (FL, U0, U1) — nejjistější je obrazovku překreslit.
+    await route();
+  }
+
+  /** Přepočítá obsah líce při změně rozměrů plochy, ať zůstane sedět na fotce. */
+  function scaleFaceContent(kx: number, ky: number): void {
+    if (Math.abs(kx - 1) < 1e-9 && Math.abs(ky - 1) < 1e-9) return;
+    for (const r of F.routes) {
+      r.points = r.points.map((p) => ({ x: Math.round(p.x * kx), y: Math.round(p.y * ky) }));
+    }
+    for (const f of F.fixtures) { f.uMm = Math.round(f.uMm * kx); f.vMm = Math.round(f.vMm * ky); }
+    for (const a of F.areas) {
+      a.uMm = Math.round(a.uMm * kx); a.vMm = Math.round(a.vMm * ky);
+      a.widthMm = Math.round(a.widthMm * kx); a.heightMm = Math.round(a.heightMm * ky);
+    }
+    for (const d of F.dims) {
+      for (const anc of [d.from, d.to]) {
+        if (anc.kind === 'point') { anc.uMm = Math.round(anc.uMm * kx); anc.vMm = Math.round(anc.vMm * ky); }
+      }
+    }
+    // Dlaždice (fotka na výřezu líce) — podklad přes celou stěnu region nemá.
+    for (const b of F.backgrounds) {
+      if (b.region) {
+        b.region.uMm = Math.round(b.region.uMm * kx); b.region.vMm = Math.round(b.region.vMm * ky);
+        b.region.widthMm = Math.round(b.region.widthMm * kx); b.region.heightMm = Math.round(b.region.heightMm * ky);
+      }
+      if (b.quad) b.quad = b.quad.map((q) => ({ x: Math.round(q.x * kx), y: Math.round(q.y * ky) }));
+      if (b.mesh) b.mesh.dst = b.mesh.dst.map((q) => ({ x: Math.round(q.x * kx), y: Math.round(q.y * ky) }));
+    }
   }
 
   /**
@@ -1714,6 +1881,30 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     const active = activeBg();
     if (active && F.backgrounds.length) {
       const hint = document.createElement('div');
+    // Fotostěna: ořez na skutečnou stěnu (4 rohy + narovnání) a přeměření rozměrů.
+    if (isPhotoWall) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.cssText = 'gap:8px;flex-wrap:wrap;margin-bottom:8px';
+      const crop = document.createElement('button');
+      crop.textContent = '✂️ Oříznout na stěnu';
+      crop.title = 'Označíš 4 rohy stěny na fotce; obraz se perspektivně narovná a vyplní celou plochu.';
+      crop.onclick = () => void cropPhotoWall();
+      const size = document.createElement('button');
+      size.textContent = '📏 Přeměřit rozměry';
+      size.title = 'Zadat (nebo odpípnout metrem) skutečnou šířku a výšku stěny.';
+      size.onclick = () => showSizePanel();
+      row.append(crop, size);
+      if (noScale()) {
+        const b = document.createElement('span');
+        b.className = 'muted';
+        b.style.fontSize = '12px';
+        b.textContent = 'zatím bez měřítka';
+        row.append(b);
+      }
+      panel.appendChild(row);
+    }
+
       hint.className = 'muted';
       hint.style.cssText = 'font-size:12px;margin-bottom:6px';
       hint.textContent = 'Dlaždici posuň tažením, roztáhni za rohy, otoč modrým úchopem. „⇱ Volné rohy" = tahej každý roh zvlášť (perspektiva, pro slícování fotek).';

@@ -29,7 +29,12 @@ export function migrateProject(p: Project): Project {
   for (const s of p.storeys ?? []) {
     // Fotostěny nejsou půdorys: nemají rohy, sousedy ani místnosti. Stavební
     // geometrii (graf rohů, ořez líců) na ně pouštět nesmíme — přepsala by jim osu.
-    if (s.photoWalls) continue;
+    if (s.photoWalls) {
+      // Dřív se fotostěna poznávala podle `freeScale`. Ten ale po přeměření mizí,
+      // tak má identita vlastní příznak — starším plochám ho doplníme.
+      for (const w of s.walls ?? []) w.photoWall ??= true;
+      continue;
+    }
     // Dřív se ukládaly jen holé polygony podlah `slabs`; teď jsou to místnosti.
     const legacySlabs = (s as { slabs?: XY[][] }).slabs;
     if (!Array.isArray(s.rooms)) s.rooms = [];

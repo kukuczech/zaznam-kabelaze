@@ -249,6 +249,33 @@ function outSize(aspect: number, long: number): { w: number; h: number } {
 }
 
 /**
+ * Znovu narovná fotku na zadaný poměr stran BEZ otevírání editoru — ze zdrojové fotky
+ * a už jednou označených rohů (`corners`, px zdroje po otočení). Používá se, když se
+ * poměr stran líce změní až dodatečně: u fotostěny se nejdřív ořízne na stěnu a teprve
+ * potom se změří skutečná šířka a výška. Přepočítat z originálu je čistší než roztáhnout
+ * už narovnaný obraz (jen jedno převzorkování).
+ */
+export async function rewarpToAspect(
+  sourceBlob: Blob,
+  corners: Pt[],
+  rotDeg: number,
+  mirror: boolean,
+  aspect: number,
+): Promise<Blob | null> {
+  if (corners.length < 4) return null;
+  const img = await blobToImage(sourceBlob);
+  const full = document.createElement('canvas');
+  full.width = img.naturalWidth; full.height = img.naturalHeight;
+  full.getContext('2d')!.drawImage(img, 0, 0);
+  const src = orientCanvas(full, Math.round(rotDeg / 90), mirror);
+  const { w, h } = outSize(aspect, 1600);
+  // Rohy jsou v pořadí TL, TR, BR, BL → cílem je celý obdélník líce.
+  const dst: Pt[] = [{ x: 0, y: 0 }, { x: w, y: 0 }, { x: w, y: h }, { x: 0, y: h }];
+  const out = warp(src, corners, dst, w, h);
+  return new Promise((res) => out.toBlob((b) => res(b), 'image/jpeg', 0.85));
+}
+
+/**
  * Otevře celoobrazovkový editor napasování s živým náhledem. Vrátí narovnaný
  * JPEG blob + pozice bodů + otočení, nebo null (uživatel zrušil). aspect = len/H.
  */
