@@ -467,6 +467,13 @@ export interface Fixture {
    * `widthMm` zůstává šířkou jednoho kusu — celková šířka = count × šířka kusu.
    */
   count?: number;
+  /**
+   * Jen u vícekrabice (`kind: 'multibox'`): co je v které pozici, zleva doprava
+   * v čelním pohledu. `null`/chybějící = pozice zatím prázdná. Pozice mohou být
+   * z libovolných vrstev (zásuvka + data + tlačítko + repro…), proto se krabice
+   * kreslí napříč vrstvami a mimo zobrazené vrstvy jen zešedne.
+   */
+  slots?: (FixtureKind | null)[];
 }
 
 /** Tvar značky prvku: obdélník (většina) nebo kruh/elipsa (repro, světlo, čidla). */
@@ -528,24 +535,56 @@ export function fixtureUnitWidth(f: Fixture): number {
   return f.widthMm ?? FIXTURE_DEFS[f.kind].wMm;
 }
 
-/** Počet kusů v bloku (1–5); chybí-li, je prvek jednoduchý. */
+/** Počet kusů/pozic v bloku; chybí-li, je prvek jednoduchý. */
 export function fixtureCount(f: Fixture): number {
-  return Math.min(Math.max(Math.round(f.count ?? 1), 1), MAX_FIXTURE_COUNT);
+  return Math.min(Math.max(Math.round(f.count ?? 1), 1), maxFixtureCount(f.kind));
 }
 
-/** Nejvíc kusů v jednom bloku (dvoj- až pětizásuvka). */
+/** Nejvíc kusů v bloku: zásuvky do pětice, vícekrabice až osm pozic. */
+export function maxFixtureCount(kind: FixtureKind): number {
+  return kind === 'multibox' ? MAX_MULTIBOX_SLOTS : MAX_FIXTURE_COUNT;
+}
+
+/** Nejvíc kusů v jednom bloku stejného typu (dvoj- až pětizásuvka). */
 export const MAX_FIXTURE_COUNT = 5;
 
+/** Nejvíc pozic ve vícekrabici. */
+export const MAX_MULTIBOX_SLOTS = 8;
+
 /** Typy, které jde osadit jako blok vedle sebe (společný rámeček). */
-export const MULTI_FIXTURE_KINDS: FixtureKind[] = ['socket'];
+export const MULTI_FIXTURE_KINDS: FixtureKind[] = ['socket', 'multibox'];
+
+/**
+ * Obsazení pozic vícekrabice, doplněné/oříznuté na aktuální počet pozic.
+ * `null` = pozice zatím prázdná (obsah se doplňuje postupně).
+ */
+export function fixtureSlots(f: Fixture): (FixtureKind | null)[] {
+  const n = fixtureCount(f);
+  return Array.from({ length: n }, (_, i) => f.slots?.[i] ?? null);
+}
+
+/**
+ * Kreslí se prvek i ve skryté vrstvě? Vícekrabice ano — je to sdílená krabice,
+ * do níž sahá víc profesí, takže musí být vidět v každé vrstvě; pozice mimo
+ * zobrazené vrstvy se jen ztlumí do šedé (viz fixtureMarkerSvg).
+ */
+export function fixtureAlwaysVisible(f: Fixture): boolean {
+  return f.kind === 'multibox';
+}
 
 /** Popisek pod značkou prvku: číslo/označení a popisek; když chybí, název typu. */
 export function fixtureCaption(f: Fixture): string {
   const parts: string[] = [];
   if (f.code?.trim()) parts.push(f.code.trim());
   if (f.label?.trim()) parts.push(f.label.trim());
-  const n = fixtureCount(f);
   if (parts.length) return parts.join(' · ');
+  const n = fixtureCount(f);
+  // Vícekrabice se popisuje obsahem pozic (např. „Zásuvka+Data+Tlačítko“), dokud
+  // je prázdná, jen počtem pozic.
+  if (f.kind === 'multibox') {
+    const filled = fixtureSlots(f).filter((k): k is FixtureKind => !!k);
+    return filled.length ? filled.map((k) => FIXTURE_DEFS[k].label).join('+') : `Vícekrabice ${n}×`;
+  }
   return n > 1 ? `${n}× ${FIXTURE_DEFS[f.kind].label.toLowerCase()}` : FIXTURE_DEFS[f.kind].label;
 }
 
@@ -632,6 +671,9 @@ export const FIXTURE_LAYER: Record<FixtureKind, string> = {
   drainround: 'voda',
   washsiphon: 'voda',
   sinkoutlet: 'voda',
+  // Vícekrabice patří formálně do silnoproudu, ale kreslí se napříč vrstvami
+  // (viz fixtureAlwaysVisible) — obsah pozic může být z libovolné vrstvy.
+  multibox: 'silnoproud',
 };
 
 /** Výchozí vrstva nově osazeného prvku podle jeho typu. */

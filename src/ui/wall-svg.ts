@@ -1,7 +1,7 @@
 // Statické vykreslení elevace stěny do SVG (sdílené editorem i tiskem).
 // Zobrazovací souřadnice: x = displayU (mm), y = heightMm − v (osa y dolů).
 import { displayU, displayUInverse, faceEndMm, faceLenMm, faceStartMm, type WallSide } from '../model/geometry';
-import { FIXTURE_DEFS, fixtureSize, fixtureCaption, fixtureCount, isCategoryVisible, type Anchor, type Category, type Dimension, type Fixture, type FixtureKind, type Wall, type WallArea, type XY } from '../model/types';
+import { FIXTURE_DEFS, FIXTURE_LAYER, fixtureSize, fixtureCaption, fixtureCount, fixtureSlots, fixtureAlwaysVisible, isCategoryVisible, type Anchor, type Category, type Dimension, type Fixture, type FixtureKind, type Wall, type WallArea, type XY } from '../model/types';
 
 export interface ViewBox {
   x: number;
@@ -174,6 +174,9 @@ function fixtureGlyph(kind: FixtureKind, s: number, color: string): string {
     case 'sinkoutlet': // vývod na dřez — půlkruh mísy dřezu se svislým odpadem
       return `<path d="M ${(-s * 0.6).toFixed(1)} ${(-s * 0.35).toFixed(1)} A ${(s * 0.6).toFixed(1)} ${(s * 0.6).toFixed(1)} 0 0 0 ${(s * 0.6).toFixed(1)} ${(-s * 0.35).toFixed(1)} Z" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linejoin="round"/>` +
         ln(0, s * 0.25, 0, s * 0.85) + dot(0, -s * 0.05, s * 0.12);
+    case 'multibox': // vícekrabice — tři pozice v jednom rámečku
+      return rect(-s * 0.95, -s * 0.45, s * 1.9, s * 0.9, s * 0.1) +
+        ln(-s * 0.32, -s * 0.45, -s * 0.32, s * 0.45) + ln(s * 0.32, -s * 0.45, s * 0.32, s * 0.45);
   }
 }
 
@@ -190,8 +193,18 @@ function fixtureOutline(
   return `<rect x="${(cx - W / 2).toFixed(1)}" y="${(cy - H / 2).toFixed(1)}" width="${W.toFixed(1)}" height="${H.toFixed(1)}" rx="${r.toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="${strokeWidth}" opacity="${opacity}"/>`;
 }
 
-/** Značka osazeného prvku (tvar ve skutečné velikosti + symbol + popisek) v zobrazovacích souřadnicích. */
-export function fixtureMarkerSvg(wall: Wall, side: WallSide, f: Fixture, print: boolean, highlighted = false): string {
+/** Barva ztlumené (nezobrazované) pozice vícekrabice — jen obrys, ať nekřičí. */
+const DIM_COLOR = '#64748b';
+
+/**
+ * Značka osazeného prvku (tvar ve skutečné velikosti + symbol + popisek).
+ * @param visible zda je vrstva zobrazená — u vícekrabice řídí, které pozice se
+ *   kreslí barevně a které jen šedě (krabice sama je vidět vždy).
+ */
+export function fixtureMarkerSvg(
+  wall: Wall, side: WallSide, f: Fixture, print: boolean, highlighted = false,
+  visible: (catId: string) => boolean = () => true,
+): string {
   const def = FIXTURE_DEFS[f.kind];
   const c = toDisplay(wall, side, f.uMm, f.vMm);
   const { w, h } = fixtureSize(f);
@@ -199,20 +212,50 @@ export function fixtureMarkerSvg(wall: Wall, side: WallSide, f: Fixture, print: 
   const label = fixtureCaption(f);
   // symbol zmenšíme, aby se vešel do menšího rozměru s okrajem; strop kvůli čitelnosti
   // (u bloku se počítá z JEDNOHO kusu, ne z celé šířky bloku)
-  const glyphS = Math.max(Math.min(Math.min(w / fixtureCount(f), h) * 0.3, 90), 22);
+  const n = fixtureCount(f);
+  const glyphS = Math.max(Math.min(Math.min(w / n, h) * 0.3, 90), 22);
   const ring = highlighted
     ? fixtureOutline(def.shape, c.x, c.y, w, h, 'none', '#22d3ee', 30, 0.75, 80)
     : '';
-  // Blok víc kusů vedle sebe (dvoj-/trojzásuvka…): jeden prvek, ale n značek v řadě
-  // symetricky kolem středu — kótuje se od středu bloku.
-  const n = fixtureCount(f);
+  // Blok víc kusů vedle sebe (dvoj-/trojzásuvka…, vícekrabice): jeden prvek, ale
+  // n značek v řadě symetricky kolem středu — kótuje se od středu bloku.
   const unit = w / n;
   const cells = Array.from({ length: n }, (_, i) => c.x - w / 2 + unit * (i + 0.5));
+  // Vícekrabice: každá pozice může být jiný typ z jiné vrstvy. Pozice ve skryté
+  // vrstvě (i prázdná pozice) se kreslí jen šedě — zvýrazněné zůstane to, co
+  // patří do právě zobrazených vrstev.
+  const slots = f.kind === 'multibox' ? fixtureSlots(f) : null;
+  const cellKind = (i: number): FixtureKind | null => (slots ? slots[i] : f.kind);
+  const cellActive = (i: number): boolean => {
+    const k = cellKind(i);
+    return k != null && (!slots || visible(FIXTURE_LAYER[k]));
+  };
+  const cellColor = (i: number): string => {
+    const k = cellKind(i);
+    return cellActive(i) && k ? FIXTURE_DEFS[k].color : DIM_COLOR;
+  };
+  const bodies = cells.map((x, i) => {
+    const k = cellKind(i);
+    const col = cellColor(i);
+    const empty = slots && !k;
+    const shape = k ? FIXTURE_DEFS[k].shape : 'rect';
+    const box = fixtureOutline(shape, x, c.y, unit, h, bg, col, 18, print ? 1 : cellActive(i) ? 0.95 : 0.5);
+    // Prázdná pozice: jen čárkovaný obrys (obsah se doplní později).
+    const dashed = empty ? box.replace('/>', ' stroke-dasharray="40 30"/>') : box;
+    const glyph = k
+      ? `<g transform="translate(${x} ${c.y})" opacity="${cellActive(i) ? 1 : 0.5}">${fixtureGlyph(k, glyphS, col)}</g>`
+      : '';
+    return dashed + glyph;
+  }).join('');
+  // Vícekrabici navíc olemuj společným rámečkem — je to jedna sdílená krabice.
+  const frame = slots
+    ? fixtureOutline('rect', c.x, c.y, w, h, 'none', print ? '#111' : '#e2e8f0', 12, 0.8, 26)
+    : '';
   return (
     `<g data-fixture="${f.id}">` +
     ring +
-    cells.map((x) => fixtureOutline(def.shape, x, c.y, unit, h, bg, def.color, 18, print ? 1 : 0.95)).join('') +
-    cells.map((x) => `<g transform="translate(${x} ${c.y})">${fixtureGlyph(f.kind, glyphS, def.color)}</g>`).join('') +
+    frame +
+    bodies +
     `<text x="${c.x}" y="${(c.y + h / 2 + 170).toFixed(1)}" text-anchor="middle" font-size="130" font-weight="bold" fill="${print ? '#111' : def.color}" paint-order="stroke" stroke="${print ? '#fff' : '#0f172a'}" stroke-width="36">${esc(label)}</text>` +
     `</g>`
   );
@@ -565,7 +608,8 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
     }
     if (a.kind === 'fixture') {
       const f = face.fixtures.find((x) => x.id === a.fixtureId);
-      return !!f && !catVisible(f.categoryId);
+      // Vícekrabice se kreslí ve všech vrstvách → její kóty taky.
+      return !!f && !catVisible(f.categoryId) && !fixtureAlwaysVisible(f);
     }
     if (a.kind === 'area') {
       const ar = face.areas.find((x) => x.id === a.areaId);
@@ -727,9 +771,11 @@ export function wallSvgContent(wall: Wall, opts: WallSvgOptions): string {
 
   // Osazené prvky (paleta) — v rámci vrstvy navrchu, pod kótami
   for (const f of face.fixtures) {
-    if (!catVisible(f.categoryId)) continue; // skrytá vrstva
+    // Vícekrabice je sdílená napříč profesemi → kreslí se i ve skryté vrstvě
+    // (pozice mimo zobrazené vrstvy jen zešednou).
+    if (!catVisible(f.categoryId) && !fixtureAlwaysVisible(f)) continue;
     layered.push({ rank: li(f.categoryId), type: 2,
-      svg: fixtureMarkerSvg(wall, side, f, print, !print && f.id === opts.selectedFixtureId) });
+      svg: fixtureMarkerSvg(wall, side, f, print, !print && f.id === opts.selectedFixtureId, catVisible) });
   }
 
   // Emise odspodu nahoru: vrstva níž v seznamu (větší rank) dřív; při shodě vrstvy

@@ -1,7 +1,7 @@
 // Elevation editor stěny: kreslení tras, kóty, fotky, DISTO plnění délek.
 import { project, saveProject, savePhoto, getPhoto, deletePhoto, undo, redo, canUndo, canRedo, onHistoryChange } from '../db';
 import { distToSegment, faceCeilingPolyline, faceEndMm, faceLenMm, faceStartMm, type WallSide } from '../model/geometry';
-import { newId, resolveBackgrounds, roomSurfaces, FIXTURE_DEFS, FIXTURE_KINDS, FIXTURE_LAYER, MAX_FIXTURE_COUNT, MULTI_FIXTURE_KINDS, fixtureSize, fixtureCount, fixtureUnitWidth, defaultCategoryForFixture, fixtureLayerIds, fixtureKindsForLayer, isCategoryVisible, type Anchor, type Dimension, type Fixture, type FixtureKind, type Route, type Wall, type WallArea, type WallBackground, type XY } from '../model/types';
+import { newId, resolveBackgrounds, roomSurfaces, FIXTURE_DEFS, FIXTURE_KINDS, FIXTURE_LAYER, MULTI_FIXTURE_KINDS, maxFixtureCount, fixtureSize, fixtureCount, fixtureSlots, fixtureUnitWidth, defaultCategoryForFixture, fixtureLayerIds, fixtureKindsForLayer, isCategoryVisible, type Anchor, type Dimension, type Fixture, type FixtureKind, type Route, type Wall, type WallArea, type WallBackground, type XY } from '../model/types';
 import { clearDistoTarget, connectDisto, onDistoStatus, setDistoTarget } from '../disto';
 import { affine3, areaDisplayRect, rectDisplayRect, dimEndpoints, dimGeomLengthMm, fixtureThumbSvg, fromDisplay, meshTriangles, resolveAnchor, toDisplay, wallSvgContent, wallViewBox, type ViewBox } from './wall-svg';
 import { registerCleanup, route } from '../main';
@@ -2365,6 +2365,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
       cntRow.className = 'row';
       appendFixtureCount(cntRow, last, () => showPlacePanel());
       if (cntRow.childElementCount) panel.appendChild(cntRow);
+      appendMultiboxSlots(panel, last, () => showPlacePanel());
       appendFixtureEdgeDims(panel, last, (fe) => showPlacePanel(fe), focusEdge);
     }
   }
@@ -2380,9 +2381,10 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     row.className = 'muted';
     row.style.cssText = 'display:inline-flex;align-items:center;gap:6px';
     row.textContent = 'Počet v bloku:';
+    if (f.kind === 'multibox') row.textContent = 'Pozic vedle sebe:';
     const sel = document.createElement('select');
     sel.title = 'Kolik kusů vedle sebe (kótuje se od středu bloku)';
-    for (let n = 1; n <= MAX_FIXTURE_COUNT; n++) {
+    for (let n = 1; n <= maxFixtureCount(f.kind); n++) {
       const o = document.createElement('option');
       o.value = String(n);
       o.textContent = n === 1 ? '1× (jednoduchá)' : `${n}×`;
@@ -2398,6 +2400,61 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     };
     row.appendChild(sel);
     host.appendChild(row);
+  }
+
+  /**
+   * Obsazení pozic vícekrabice — pro každou pozici (zleva doprava v čelním pohledu)
+   * výběr libovolného typu prvku NAPŘÍČ VRSTVAMI, nebo prázdno. Vyplňovat se dá
+   * postupně; krabice je vidět vždy, pozice mimo zobrazené vrstvy jen zešednou.
+   */
+  function appendMultiboxSlots(host: HTMLElement, f: Fixture, rerender: () => void): void {
+    if (f.kind !== 'multibox') return;
+    const slots = fixtureSlots(f);
+    const wrap = document.createElement('div');
+    wrap.className = 'row';
+    wrap.style.flexWrap = 'wrap';
+    const cap = document.createElement('span');
+    cap.className = 'muted';
+    cap.textContent = 'Obsah pozic (zleva):';
+    wrap.appendChild(cap);
+    slots.forEach((cur, i) => {
+      const lbl = document.createElement('label');
+      lbl.className = 'muted';
+      lbl.style.cssText = 'display:inline-flex;align-items:center;gap:4px';
+      lbl.textContent = `${i + 1}.`;
+      const sel = document.createElement('select');
+      const empty = document.createElement('option');
+      empty.value = '';
+      empty.textContent = '— prázdné —';
+      if (!cur) empty.selected = true;
+      sel.appendChild(empty);
+      // Typy setříděné po vrstvách, ať je vidět, z které profese pozice je.
+      for (const catId of fixtureLayerIds()) {
+        const c = catById(catId);
+        const grp = document.createElement('optgroup');
+        grp.label = c?.name ?? catId;
+        for (const kind of fixtureKindsForLayer(catId, project.fixtureOrder)) {
+          if (kind === 'multibox') continue; // krabice v krabici nedává smysl
+          const o = document.createElement('option');
+          o.value = kind;
+          o.textContent = FIXTURE_DEFS[kind].label;
+          if (kind === cur) o.selected = true;
+          grp.appendChild(o);
+        }
+        if (grp.childElementCount) sel.appendChild(grp);
+      }
+      sel.onchange = () => {
+        const next = fixtureSlots(f);
+        next[i] = (sel.value || null) as FixtureKind | null;
+        f.slots = next;
+        saveProject();
+        redraw();
+        rerender();
+      };
+      lbl.appendChild(sel);
+      wrap.appendChild(lbl);
+    });
+    host.appendChild(wrap);
   }
 
   /** Kóta prvku k dané hraně líce (nejvýš jedna na hranu), pokud už existuje. */
@@ -2585,6 +2642,7 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
     sizeRow.appendChild(document.createTextNode(' '));
     appendFixtureCount(sizeRow, f, () => showFixturePanel(f));
     panel.appendChild(sizeRow);
+    appendMultiboxSlots(panel, f, () => showFixturePanel(f));
 
     // Kóty ke čtyřem hranám líce — postupně kterákoli (i všechny), míra prvek posune.
     appendFixtureEdgeDims(panel, f, (fe) => showFixturePanel(f, fe), focusEdge);
