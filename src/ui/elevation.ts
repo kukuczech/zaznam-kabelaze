@@ -1943,7 +1943,21 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
           redraw();
           showPhotoPanel();
         };
-        switcher.appendChild(thumb);
+        // Název dlaždice rovnou pod ní — přejmenovat jde každá, ne jen ta aktivní.
+        const cell = document.createElement('div');
+        cell.style.cssText = 'display:flex;flex-direction:column;gap:3px;flex:0 0 auto';
+        const nameIn = document.createElement('input');
+        nameIn.placeholder = `Podklad ${i + 1}`;
+        nameIn.value = b.label ?? '';
+        nameIn.title = 'Název podkladu';
+        nameIn.style.cssText = 'width:64px;font-size:11px;padding:3px 5px;min-height:0';
+        nameIn.onchange = () => {
+          b.label = nameIn.value.trim() || undefined;
+          saveProject();
+          showPhotoPanel();
+        };
+        cell.append(thumb, nameIn);
+        switcher.appendChild(cell);
       }
       panel.appendChild(switcher);
 
@@ -2068,9 +2082,13 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
 
     const row = document.createElement('div');
     row.className = 'row';
+    row.style.cssText = 'flex-wrap:wrap;gap:8px;align-items:flex-start';
     for (const id of F.photoIds) {
       const blob = await getPhoto(id);
       if (!blob) continue;
+      // Fotka + její název pod ní (ať se dá poznat, která je která).
+      const cell = document.createElement('div');
+      cell.style.cssText = 'display:flex;flex-direction:column;gap:3px;flex:0 0 auto';
       const img = document.createElement('img');
       img.src = URL.createObjectURL(blob);
       img.style.cssText = 'width:72px;height:72px;object-fit:cover;border-radius:8px;cursor:pointer';
@@ -2141,7 +2159,21 @@ export async function renderElevation(root: HTMLElement, wallId: string, side: W
         ov.append(big, btns);
         document.body.appendChild(ov);
       };
-      row.appendChild(img);
+      // Název fotky — píše se rovnou do pole (žádný dialog: v nativním shellu
+      // se JS dialog po zavření pickeru nemusí vykreslit).
+      const nameIn = document.createElement('input');
+      nameIn.placeholder = `Fotka ${F.photoIds.indexOf(id) + 1}`;
+      nameIn.value = F.photoNames?.[id] ?? '';
+      nameIn.title = 'Název fotky';
+      nameIn.style.cssText = 'width:72px;font-size:11px;padding:3px 5px;min-height:0';
+      nameIn.onchange = () => {
+        const v = nameIn.value.trim();
+        F.photoNames ??= {};
+        if (v) F.photoNames[id] = v; else delete F.photoNames[id];
+        saveProject();
+      };
+      cell.append(img, nameIn);
+      row.appendChild(cell);
     }
 
     // Přidání fotek: soubory + přímé focení (mobil)

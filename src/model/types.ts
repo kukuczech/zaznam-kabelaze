@@ -168,6 +168,11 @@ export interface RoomSlopeCeiling {
  */
 export interface WallFace {
   photoIds: string[];
+  /**
+   * Názvy nahraných / vyfocených fotek, klíč = photoId. Chybí-li, ukáže se pořadí
+   * („Fotka 1"). Dlaždice (napasované podklady) mají vlastní `WallBackground.label`.
+   */
+  photoNames?: Record<string, string>;
   routes: Route[];
   dims: Dimension[];
   /** Osazené prvky (zásuvky, vypínače, čidla…) umístěné na této straně. */
